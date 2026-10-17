@@ -1,0 +1,90 @@
+name: Build and launch iOS Simulator
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios-simulator:
+    name: Build and launch app
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Generate the iOS project
+        run: npx expo prebuild --platform ios --clean --no-install
+
+      - name: Install CocoaPods dependencies
+        run: pod install --project-directory=ios
+
+      - name: Select and boot an iPhone simulator
+        shell: bash
+        run: |
+          echo "Using Xcode:"
+          xcodebuild -version
+          DEVICE_INFO="$(xcrun simctl list devices available -j | node -e '
+            let input = "";
+            process.stdin.on("data", chunk => input += chunk);
+            process.stdin.on("end", () => {
+              const devices = Object.values(JSON.parse(input).devices).flat();
+              const device = devices.find(item => item.isAvailable && item.name.startsWith("iPhone"));
+              if (!device) {
+                console.error("No available iPhone simulator was found.");
+                process.exit(1);
+              }
+              console.log(`${device.name}|${device.udid}`);
+            });
+          ')"
+          IFS='|' read -r DEVICE_NAME DEVICE_ID <<< "$DEVICE_INFO"
+          echo "Selected simulator: $DEVICE_NAME ($DEVICE_ID)"
+          echo "DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+
+      - name: Compile Release app for the iOS Simulator
+        run: >-
+          xcodebuild
+          -workspace ios/MusicPlayerExpo.xcworkspace
+          -scheme MusicPlayerExpo
+          -configuration Release
+          -destination "platform=iOS Simulator,id=$DEVICE_ID"
+          -derivedDataPath "$RUNNER_TEMP/DerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          build
+
+      - name: Install, launch, and capture the simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator/MusicPlayerExpo.app"
+          test -d "$APP_PATH"
+          mkdir -p artifacts
+          xcrun simctl install "$DEVICE_ID" "$APP_PATH"
+          LAUNCH_OUTPUT="$(xcrun simctl launch --terminate-running-process "$DEVICE_ID" com.anonymous.MusicPlayerExpo)"
+          echo "$LAUNCH_OUTPUT"
+          APP_PID="${LAUNCH_OUTPUT##*: }"
+          sleep 8
+          kill -0 "$APP_PID"
+          xcrun simctl io "$DEVICE_ID" screenshot artifacts/ios-simulator.png
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" artifacts/MusicPlayerExpo-simulator.zip
+
+      - name: Upload simulator screenshot and app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-build
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
