@@ -49,7 +49,14 @@ export class AudioEngine {
   private autoPauseMs: number | null = null;
   private sleepDeadlineMs: number | null = null;
   private autoPauseTimer: ReturnType<typeof setTimeout> | null = null;
-  private surroundStrength = 0;
+  private masterGainDb = 0;
+  private bassBoostDb = 0;
+  private trebleBoostDb = 0;
+  private virtual3dEnabled = true;
+  private virtual3dGapMs = 30;
+  private surround71Enabled = true;
+  private surround71Level = 0.22;
+  private surround71Spread = 0.7;
   private loadGeneration = 0;
   private handlingTrackEnd = false;
   private shouldAutoplay = true;
@@ -145,8 +152,7 @@ export class AudioEngine {
       this.sound = handle;
       this.audioGraph.setVolume(this.volume);
       this.audioGraph.setPan(this.pan);
-      this.audioGraph.setSurroundStrength(this.surroundStrength);
-      this.audioGraph.setBands(this.dspManager.getBands(), this.dspManager.isEnabledAll());
+      this.applyDSPSettings();
       if (this.shouldAutoplay) {
         handle.play();
         this.setState('playing');
@@ -327,16 +333,52 @@ export class AudioEngine {
 
   getPan(): number { return this.pan; }
 
-  setSurroundStrength(value: number) {
-    this.surroundStrength = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : this.surroundStrength;
-    this.audioGraph.setSurroundStrength(this.surroundStrength);
-  }
-
   applyDSPSettings() {
     this.audioGraph.setBands(this.dspManager.getBands(), this.dspManager.isEnabledAll());
+    this.audioGraph.setMasterGain(this.masterGainDb);
+    this.audioGraph.setBassBoost(this.bassBoostDb);
+    this.audioGraph.setTrebleBoost(this.trebleBoostDb);
+    this.audioGraph.setVirtual3DEnabled(this.virtual3dEnabled);
+    this.audioGraph.setVirtual3DGap(this.virtual3dGapMs);
+    this.audioGraph.setSurround71Enabled(this.surround71Enabled);
+    this.audioGraph.setSurround71(this.surround71Level, this.surround71Spread);
   }
 
-  getSurroundStrength(): number { return this.surroundStrength; }
+  setMasterGain(value: number) {
+    this.masterGainDb = Number.isFinite(value) ? Math.max(-20, Math.min(20, value)) : this.masterGainDb;
+    this.audioGraph.setMasterGain(this.masterGainDb);
+  }
+
+  setBassBoost(value: number) {
+    this.bassBoostDb = Number.isFinite(value) ? Math.max(0, Math.min(30, value)) : this.bassBoostDb;
+    this.audioGraph.setBassBoost(this.bassBoostDb);
+  }
+
+  setTrebleBoost(value: number) {
+    this.trebleBoostDb = Number.isFinite(value) ? Math.max(0, Math.min(30, value)) : this.trebleBoostDb;
+    this.audioGraph.setTrebleBoost(this.trebleBoostDb);
+  }
+
+  setVirtual3DEnabled(enabled: boolean) {
+    this.virtual3dEnabled = enabled;
+    this.audioGraph.setVirtual3DEnabled(enabled);
+  }
+
+  setVirtual3DGap(value: number) {
+    this.virtual3dGapMs = Number.isFinite(value) ? Math.round(Math.max(1, Math.min(40, value))) : this.virtual3dGapMs;
+    this.audioGraph.setVirtual3DGap(this.virtual3dGapMs);
+  }
+
+  setSurround71Enabled(enabled: boolean) {
+    this.surround71Enabled = enabled;
+    this.audioGraph.setSurround71Enabled(enabled);
+  }
+
+  setSurround71(level: number, spread: number) {
+    this.surround71Level = Number.isFinite(level) ? Math.max(0.15, Math.min(0.45, level)) : this.surround71Level;
+    this.surround71Spread = Number.isFinite(spread) ? Math.max(0.05, Math.min(0.7, spread)) : this.surround71Spread;
+    this.audioGraph.setSurround71(this.surround71Level, this.surround71Spread);
+  }
 
   setRepeat(type: RepeatType) { this.repeatType = type; }
   getRepeat(): RepeatType { return this.repeatType; }
