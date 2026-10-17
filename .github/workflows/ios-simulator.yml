@@ -2,9 +2,6 @@ name: Build and launch iOS Simulator
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - codex/unsigned-ios-device-ipa
 
 permissions:
   contents: read
@@ -84,32 +81,10 @@ jobs:
           xcrun simctl io "$DEVICE_ID" screenshot artifacts/ios-simulator.png
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" artifacts/MusicPlayerExpo-simulator.zip
 
-      - name: Build unsigned iPhone and iPad app
-        run: >-
-          xcodebuild
-          -workspace ios/MusicPlayerExpo.xcworkspace
-          -scheme MusicPlayerExpo
-          -configuration Release
-          -destination "generic/platform=iOS"
-          -derivedDataPath "$RUNNER_TEMP/DeviceDerivedData"
-          CODE_SIGNING_ALLOWED=NO
-          build
-
-      - name: Package unsigned device IPA
-        shell: bash
-        run: |
-          set -euo pipefail
-          DEVICE_APP="$RUNNER_TEMP/DeviceDerivedData/Build/Products/Release-iphoneos/MusicPlayerExpo.app"
-          test -d "$DEVICE_APP"
-          mkdir -p "$RUNNER_TEMP/ipa/Payload" artifacts
-          ditto "$DEVICE_APP" "$RUNNER_TEMP/ipa/Payload/MusicPlayerExpo.app"
-          (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/artifacts/MusicPlayerExpo-unsigned.ipa" Payload)
-          unzip -l artifacts/MusicPlayerExpo-unsigned.ipa | head -20
-
-      - name: Upload simulator screenshot, app, and unsigned device IPA
+      - name: Upload simulator screenshot and app
         uses: actions/upload-artifact@v4
         with:
-          name: ios-device-test-builds
+          name: ios-simulator-build
           path: artifacts/
           if-no-files-found: error
           retention-days: 7
