@@ -63,7 +63,7 @@ The app is a local-file music player with library, now-playing controls, EQ, Vir
 - `npx tsc --noEmit` passed after the source changes on 2026-10-18.
 - Direct ESLint (`./node_modules/.bin/eslint --no-cache src`) passed; the Expo lint wrapper could not use the read-only `.expo` cache.
 - `npx expo export --platform ios` passed and bundled the iOS JavaScript.
-- GitHub Actions run `39122675483` passed dependency install, Expo prebuild, CocoaPods, Xcode device build, IPA packaging, and artifact upload. It produced the unsigned `ios-device-ipa` artifact (16,? bytes; artifact id `12134503442`).
+- GitHub Actions run `39122675483` passed dependency install, Expo prebuild, CocoaPods, Xcode device build, IPA packaging, and artifact upload. It produced the unsigned `ios-device-ipa` artifact (17,036,815 bytes; artifact id `12134503442`).
 
 ## Immediate next steps
 
