@@ -37,6 +37,11 @@ export interface EngineInterface {
 export class AudioEngine {
   private static instance: AudioEngine;
   private sound: AudioTagHandle | null = null;
+  private attachingNativePlayer: {
+    trackId: string;
+    requestId: number;
+    handle: AudioTagHandle;
+  } | null = null;
   private ambientSound: AudioPlayer | null = null;
   private dspManager: DSPManager;
   private audioGraph: AudioGraphController;
@@ -178,12 +183,22 @@ export class AudioEngine {
 
   async attachNativePlayer(trackId: string, requestId: number, handle: AudioTagHandle) {
     if (requestId !== this.loadGeneration || trackId !== this.currentTrack?.id) return;
+    if (this.sound === handle) return;
+    const currentAttachment = this.attachingNativePlayer;
+    if (
+      currentAttachment?.handle === handle
+      && currentAttachment.trackId === trackId
+      && currentAttachment.requestId === requestId
+    ) return;
+    const attachment = { trackId, requestId, handle };
+    this.attachingNativePlayer = attachment;
     try {
       const connected = await this.audioGraph.connect(handle);
       if (!connected || requestId !== this.loadGeneration || trackId !== this.currentTrack?.id) {
         this.audioGraph.disconnectSource(handle);
         return;
       }
+      this.audioGraph.resetTrackEffects();
       this.sound = handle;
       this.audioGraph.setVolume(this.volume);
       this.audioGraph.setPan(this.pan);
@@ -198,6 +213,8 @@ export class AudioEngine {
       void this.updatePlaybackNotification();
     } catch (error) {
       this.notifyNativePlaybackError(requestId, error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      if (this.attachingNativePlayer === attachment) this.attachingNativePlayer = null;
     }
   }
 

@@ -1,14 +1,21 @@
 import {
   AudioContext,
   AudioManager,
+  type AudioNode,
+  type AudioParam,
   type AudioTagHandle,
   type BiquadFilterNode,
   type GainNode,
   type MediaElementAudioSourceNode,
   type StereoPannerNode,
-  type DelayNode,
+  type WorkletProcessingNode,
 } from 'react-native-audio-api';
+import { Platform } from 'react-native';
+import { createSynchronizable } from 'react-native-worklets';
 import { DEFAULT_BANDS, type EQBand } from './DSPManager';
+
+type SharedBoolean = { getDirty(): boolean; setDirty(value: boolean): void };
+type SharedNumber = { getDirty(): number; setDirty(value: number): void };
 
 /** Owns the native processing graph used by the main music player. */
 export class AudioGraphController {
@@ -20,14 +27,19 @@ export class AudioGraphController {
   private readonly preGain: GainNode;
   private readonly bassBoost: BiquadFilterNode;
   private readonly trebleBoost: BiquadFilterNode;
-  private readonly virtualDelay: DelayNode;
-  private readonly virtualDelayGain: GainNode;
+  private readonly virtual3dProcessor: WorkletProcessingNode | null;
+  private readonly virtual3dEnabledParameter: SharedBoolean | null;
+  private readonly virtual3dGapParameter: SharedNumber | null;
+  private readonly virtual3dResetParameter: SharedNumber | null;
+  private readonly webVirtualDelay: ReturnType<AudioContext['createDelay']> | null;
+  private readonly webVirtualDelayGain: GainNode | null;
   private readonly dryGain: GainNode;
   private readonly wetGain: GainNode;
   private readonly sumGain: GainNode;
   private readonly panner: StereoPannerNode;
   private readonly masterGain: GainNode;
-  private readonly convolver: ReturnType<AudioContext['createConvolver']>;
+  private convolver: ReturnType<AudioContext['createConvolver']>;
+  private spatialRoomImpulse: ReturnType<AudioContext['createBuffer']>;
   private volume = 1;
   private pan = 0;
   private masterGainDb = 0;
@@ -35,6 +47,7 @@ export class AudioGraphController {
   private trebleBoostDb = 0;
   private virtual3dEnabled = false;
   private virtual3dGapMs = 30;
+  private virtual3dResetGeneration = 0;
   private surround71Enabled = false;
   private surround71Level = 0.22;
   private surround71Spread = 0.7;
@@ -75,8 +88,27 @@ export class AudioGraphController {
     this.sumGain = this.context.createGain();
     this.panner = this.context.createStereoPanner();
     this.masterGain = this.context.createGain();
-    this.virtualDelay = this.context.createDelay(0.05);
-    this.virtualDelayGain = this.context.createGain();
+
+    if (Platform.OS === 'web') {
+      this.virtual3dProcessor = null;
+      this.virtual3dEnabledParameter = null;
+      this.virtual3dGapParameter = null;
+      this.virtual3dResetParameter = null;
+      this.webVirtualDelay = this.context.createDelay(0.04);
+      this.webVirtualDelayGain = this.context.createGain();
+      this.webVirtualDelayGain.gain.value = 0;
+    } else {
+      this.virtual3dEnabledParameter = createSynchronizable(false, { fixedType: true }) as SharedBoolean;
+      this.virtual3dGapParameter = createSynchronizable(30, { fixedType: true }) as SharedNumber;
+      this.virtual3dResetParameter = createSynchronizable(0, { fixedType: true }) as SharedNumber;
+      this.virtual3dProcessor = this.createVirtual3DProcessor(
+        this.virtual3dEnabledParameter,
+        this.virtual3dGapParameter,
+        this.virtual3dResetParameter,
+      );
+      this.webVirtualDelay = null;
+      this.webVirtualDelayGain = null;
+    }
 
     this.filters.slice(0, -1).forEach((filter, index) => filter.connect(this.filters[index + 1]));
     this.filters[this.filters.length - 1].connect(this.preGain);
@@ -84,12 +116,16 @@ export class AudioGraphController {
     this.bassBoost.connect(this.trebleBoost);
     this.convolver = this.context.createConvolver();
     this.convolver.normalize = false;
-    this.convolver.buffer = this.createSpatialRoomImpulse(this.surround71Spread);
-    this.trebleBoost.connect(this.dryGain);
-    this.trebleBoost.connect(this.virtualDelay);
-    this.virtualDelay.connect(this.virtualDelayGain);
-    this.virtualDelayGain.connect(this.sumGain);
-    this.trebleBoost.connect(this.convolver);
+    this.spatialRoomImpulse = this.createSpatialRoomImpulse(this.surround71Spread);
+    this.convolver.buffer = this.spatialRoomImpulse;
+    const spatialInput: AudioNode = this.virtual3dProcessor ?? this.trebleBoost;
+    spatialInput.connect(this.dryGain);
+    spatialInput.connect(this.convolver);
+    if (this.webVirtualDelay && this.webVirtualDelayGain) {
+      this.trebleBoost.connect(this.webVirtualDelay);
+      this.webVirtualDelay.connect(this.webVirtualDelayGain);
+      this.webVirtualDelayGain.connect(this.sumGain);
+    }
     this.dryGain.connect(this.sumGain);
     this.convolver.connect(this.wetGain);
     this.wetGain.connect(this.sumGain);
@@ -98,14 +134,83 @@ export class AudioGraphController {
     this.masterGain.connect(this.context.destination);
     this.dryGain.gain.value = 1;
     this.wetGain.gain.value = 0;
-    this.virtualDelay.delayTime.value = this.virtual3dGapMs / 1000;
-    this.virtualDelayGain.gain.value = 0;
+    if (this.webVirtualDelay) this.webVirtualDelay.delayTime.value = this.virtual3dGapMs / 1000;
     this.masterGain.gain.value = this.volume;
   }
 
   static getInstance(): AudioGraphController {
     if (!this.instance) this.instance = new AudioGraphController();
     return this.instance;
+  }
+
+  /** Port the Android sample-delay effect as a right-channel delay, without a parallel echo. */
+  private createVirtual3DProcessor(
+    enabled: SharedBoolean,
+    gapMs: SharedNumber,
+    resetGeneration: SharedNumber,
+  ) {
+    const sampleRate = this.context.sampleRate;
+    const delayBuffer = new Float32Array(Math.max(1, Math.ceil(sampleRate * 0.04)));
+    let writeIndex = 0;
+    let currentDelayFrames = -1;
+    let previousEnabled = false;
+    let previousResetGeneration = 0;
+
+    return this.context.createWorkletProcessingNode((inputData, outputData, framesToProcess) => {
+      'worklet';
+      const leftInput = inputData[0];
+      const leftOutput = outputData[0];
+      if (!leftInput || !leftOutput) return;
+
+      const isEnabled = enabled.getDirty();
+      const delayFrames = Math.trunc(Math.max(1, Math.min(40, gapMs.getDirty())) * sampleRate / 1000);
+      const nextResetGeneration = resetGeneration.getDirty();
+      if (
+        delayFrames !== currentDelayFrames
+        || isEnabled !== previousEnabled
+        || nextResetGeneration !== previousResetGeneration
+      ) {
+        delayBuffer.fill(0);
+        writeIndex = 0;
+        currentDelayFrames = delayFrames;
+        previousEnabled = isEnabled;
+        previousResetGeneration = nextResetGeneration;
+      }
+
+      for (let frame = 0; frame < framesToProcess; frame++) {
+        leftOutput[frame] = leftInput[frame];
+      }
+
+      const rightInput = inputData[1];
+      const rightOutput = outputData[1];
+      if (!rightInput || !rightOutput) {
+        for (let channel = 1; channel < outputData.length; channel++) {
+          const input = inputData[channel];
+          const output = outputData[channel];
+          if (!input || !output) continue;
+          for (let frame = 0; frame < framesToProcess; frame++) output[frame] = input[frame];
+        }
+        return;
+      }
+
+      if (isEnabled) {
+        for (let frame = 0; frame < framesToProcess; frame++) {
+          const delayed = delayBuffer[writeIndex];
+          delayBuffer[writeIndex] = rightInput[frame];
+          rightOutput[frame] = delayed;
+          writeIndex = writeIndex + 1 === delayFrames ? 0 : writeIndex + 1;
+        }
+      } else {
+        for (let frame = 0; frame < framesToProcess; frame++) rightOutput[frame] = rightInput[frame];
+      }
+
+      for (let channel = 2; channel < outputData.length; channel++) {
+        const input = inputData[channel];
+        const output = outputData[channel];
+        if (!input || !output) continue;
+        for (let frame = 0; frame < framesToProcess; frame++) output[frame] = input[frame];
+      }
+    }, 'AudioRuntime');
   }
 
   /** Build the original stereo Freeverb network as a four-channel convolution IR. */
@@ -124,11 +229,12 @@ export class AudioGraphController {
     }));
     const leftLines = [...makeLines(combLeft), ...makeLines(allpassLeft)];
     const rightLines = [...makeLines(combRight), ...makeLines(allpassRight)];
-    // libdsp.so defaults: input gain 0.015, feedback 0.84, damping 0.2,
-    // allpass feedback 0.5, and wet scale 3. The input gain is applied below
-    // while rendering the impulse response.
-    const feedback = 0.84;
-    const damp = 0.2;
+    // libdsp.so resets room size to 0.9 and damping to 0.02; Freeverb maps
+    // those values to comb feedback 0.9 * 0.28 + 0.7 and damping 0.02 * 0.4.
+    // The native wet setting is applied by wetGain; Freeverb's internal wet
+    // scale of 3 is represented in this impulse response.
+    const feedback = 0.9 * 0.28 + 0.7;
+    const damp = 0.02 * 0.4;
     const allpassFeedback = 0.5;
     const process = (input: number, lines: typeof leftLines) => {
       let output = 0;
@@ -166,17 +272,53 @@ export class AudioGraphController {
       rightFromLeft[frame] = wet1 * right + wet2 * left;
       rightFromRight[frame] = wet1 * right + wet2 * left;
     }
+
+    // Android filters each reverb return with BandPassFilter(center=1000 Hz,
+    // Q=0.25). These are its Biquad coefficients, applied independently to
+    // every input/output path in the convolution matrix.
+    const angularFrequency = 2 * Math.PI * 1000 / sampleRate;
+    const alpha = Math.sin(angularFrequency) / (2 * 0.25);
+    const denominator = 1 + alpha;
+    const b1 = alpha / denominator;
+    const b2 = -alpha / denominator;
+    const a1 = 2 * Math.cos(angularFrequency) / denominator;
+    const a2 = (alpha - 1) / denominator;
+    for (let channel = 0; channel < impulse.numberOfChannels; channel++) {
+      const response = impulse.getChannelData(channel);
+      let input1 = 0;
+      let input2 = 0;
+      let output1 = 0;
+      let output2 = 0;
+      for (let frame = 0; frame < length; frame++) {
+        const input = response[frame];
+        const output = b1 * input1 + b2 * input2 + a1 * output1 + a2 * output2;
+        response[frame] = output;
+        input2 = input1;
+        input1 = input;
+        output2 = output1;
+        output1 = output;
+      }
+    }
     return impulse;
   }
 
   async connect(handle: AudioTagHandle): Promise<boolean> {
+    if (this.sourceHandle === handle && this.source) {
+      await this.context.resume();
+      return this.sourceHandle === handle && this.source !== null;
+    }
     this.disconnectSource();
     const source = this.context.createMediaElementSource(handle);
     this.source = source;
     this.sourceHandle = handle;
-    source.connect(this.filters[0]);
-    await this.context.resume();
-    return this.source === source && this.sourceHandle === handle;
+    try {
+      source.connect(this.filters[0]);
+      await this.context.resume();
+      return this.source === source && this.sourceHandle === handle;
+    } catch (error) {
+      this.disconnectSource(handle);
+      throw error;
+    }
   }
 
   disconnectSource(handle?: AudioTagHandle) {
@@ -194,49 +336,76 @@ export class AudioGraphController {
       if (!band) return;
       filter.frequency.value = band.frequency;
       filter.Q.value = band.q;
-      filter.gain.value = enabled && band.enabled ? band.gain : 0;
+      this.setParamSmoothly(filter.gain, enabled && band.enabled ? band.gain : 0, 0.018);
     });
   }
 
   setMasterGain(db: number) {
     this.masterGainDb = Number.isFinite(db) ? Math.max(-20, Math.min(20, db)) : this.masterGainDb;
-    this.preGain.gain.value = 10 ** (this.masterGainDb / 20);
+    this.setParamSmoothly(this.preGain.gain, 10 ** (this.masterGainDb / 20));
   }
 
   setBassBoost(db: number) {
     this.bassBoostDb = Number.isFinite(db) ? Math.max(0, Math.min(30, db)) : this.bassBoostDb;
-    this.bassBoost.gain.value = this.bassBoostDb;
+    this.setParamSmoothly(this.bassBoost.gain, this.bassBoostDb);
   }
 
   setTrebleBoost(db: number) {
     this.trebleBoostDb = Number.isFinite(db) ? Math.max(0, Math.min(30, db)) : this.trebleBoostDb;
-    this.trebleBoost.gain.value = this.trebleBoostDb;
+    this.setParamSmoothly(this.trebleBoost.gain, this.trebleBoostDb);
   }
 
   setVolume(value: number) {
     this.volume = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : this.volume;
-    this.masterGain.gain.value = this.volume;
+    this.setParamSmoothly(this.masterGain.gain, this.volume);
   }
 
   setPan(value: number) {
     this.pan = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : this.pan;
-    this.panner.pan.value = this.pan;
+    this.setParamSmoothly(this.panner.pan, this.pan);
   }
 
   setVirtual3DEnabled(enabled: boolean) {
     this.virtual3dEnabled = enabled;
-    this.virtualDelayGain.gain.value = enabled ? 0.24 : 0;
+    if (this.virtual3dEnabledParameter) this.virtual3dEnabledParameter.setDirty(enabled);
+    if (this.webVirtualDelayGain) this.webVirtualDelayGain.gain.value = enabled ? 0.24 : 0;
   }
 
   setVirtual3DGap(gapMs: number) {
     this.virtual3dGapMs = Number.isFinite(gapMs) ? Math.max(1, Math.min(40, gapMs)) : this.virtual3dGapMs;
-    this.virtualDelay.delayTime.value = this.virtual3dGapMs / 1000;
+    if (this.virtual3dGapParameter) this.virtual3dGapParameter.setDirty(this.virtual3dGapMs);
+    if (this.webVirtualDelay) this.webVirtualDelay.delayTime.value = this.virtual3dGapMs / 1000;
   }
 
   setSurround71Enabled(enabled: boolean) {
     this.surround71Enabled = enabled;
-    this.dryGain.gain.value = enabled ? 0 : 1;
-    this.wetGain.gain.value = enabled ? this.surround71Level : 0;
+    this.dryGain.gain.value = 1;
+    this.setGainSmoothly(this.wetGain, enabled ? this.surround71Level : 0);
+  }
+
+  private setGainSmoothly(node: GainNode, value: number) {
+    this.setParamSmoothly(node.gain, value, 0.025);
+  }
+
+  private setParamSmoothly(param: AudioParam, value: number, timeConstant = 0.015) {
+    const now = this.context.currentTime;
+    param.cancelAndHoldAtTime(now);
+    param.setTargetAtTime(value, now, timeConstant);
+  }
+
+  /** Clear per-track delay history and replace the convolver to discard its old tail. */
+  resetTrackEffects() {
+    if (this.virtual3dResetParameter) {
+      this.virtual3dResetGeneration += 1;
+      this.virtual3dResetParameter.setDirty(this.virtual3dResetGeneration);
+    }
+    (this.virtual3dProcessor ?? this.trebleBoost).disconnect(this.convolver);
+    this.convolver.disconnect();
+    this.convolver = this.context.createConvolver();
+    this.convolver.normalize = false;
+    this.convolver.buffer = this.spatialRoomImpulse;
+    (this.virtual3dProcessor ?? this.trebleBoost).connect(this.convolver);
+    this.convolver.connect(this.wetGain);
   }
 
   setSurround71(level: number, spread: number) {
@@ -246,12 +415,13 @@ export class AudioGraphController {
     const spreadChanged = Math.abs(nextSpread - this.surround71Spread) >= 0.005;
     this.surround71Level = nextLevel;
     this.surround71Spread = nextSpread;
-    this.wetGain.gain.value = this.surround71Enabled ? nextLevel : 0;
+    this.setGainSmoothly(this.wetGain, this.surround71Enabled ? nextLevel : 0);
     if (!spreadChanged) return;
     if (this.impulseUpdateTimer) clearTimeout(this.impulseUpdateTimer);
     this.impulseUpdateTimer = setTimeout(() => {
       this.impulseUpdateTimer = null;
-      this.convolver.buffer = this.createSpatialRoomImpulse(this.surround71Spread);
+      this.spatialRoomImpulse = this.createSpatialRoomImpulse(this.surround71Spread);
+      this.convolver.buffer = this.spatialRoomImpulse;
     }, 80);
   }
 
