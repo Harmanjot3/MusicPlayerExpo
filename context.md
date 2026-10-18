@@ -42,15 +42,15 @@ The app is a local-file music player with library, now-playing controls, EQ, Vir
 - EQ uses the Android 10 center frequencies (32 Hz through 16 kHz), Q 0.5, and ±20 dB range. Bass boost is 125 Hz/Q1/0–30 dB; treble boost is 7.5 kHz/Q1/0–30 dB; gain is ±20 dB.
 - System presets include Acoustic, Classical, Dance, Extreme BASS, Flat, Hip-Hop, Pop, Rock, and Speaker variants recovered from bundled Android preset data. Preset selection updates EQ, gain, boosts, and effect settings together.
 - Virtual 3D and Surround 7.1 have independent enable switches and persisted values. Virtual 3D exposes the Android 1–40 ms delay setting. Surround level uses 0.15–0.45 and spread 0.05–0.70.
-- The 7.1 reverb graph is generated from a Freeverb-style comb/allpass network using delay lengths and defaults recovered from the Android native library. The 3D control currently uses an AudioContext delay path. Source integration and parameter values are implemented; their audible output has not been compared against Android on a physical device.
+- The APK's `libdsp.so` contains the native `revmodel` Freeverb stereo reverb. The 7.1 control enables that stereo effect; it does not emit eight physical channels. The iOS graph now ports its recovered comb/allpass delays, feedback, damping, wet/width mapping, and wet-only enabled path. Virtual 3D still uses a simple delay path and has not been ported from its native sample processor.
 - Horizontal controls have larger touch targets, range clamping, step sizing, accessibility values/actions, and speaker diagrams that update with effect parameters.
 - Ambient Sound still loops imported audio clips. Microphone ambience is not implemented.
 
 ## Known gaps and verification limits
 
-- **No iOS native build or physical-device listening check has been completed for the current DSP changes.** The GitHub workflow must finish successfully before there is an IPA artifact. Build success will verify compilation and packaging only; it will not prove playback audibility, route behavior, effect parity, or iOS 26 behavior on the owner's iPhone/iPad.
+- Workflow run `39075207752` produced an unsigned iOS device IPA before the current fixes. The user installed it and reported intermittent playback and weak Surround 7.1. The current fixes have not yet been packaged into a new IPA; source checks do not confirm physical-device audio behavior.
 - The IPA workflow sets `CODE_SIGNING_ALLOWED=NO`; its artifact is unsigned. It cannot be directly installed on iPhone/iPad without signing through a compatible sideloading workflow. The user has no paid Apple Developer account.
-- The reverse-engineered settings and presets are grounded in Android assets/native code, but exact effect output is not established. The current Virtual 3D delay graph is a port of the exposed parameter semantics; the original native sample-processing algorithm has not yet been fully verified against output audio. Do not describe the app as bit-identical or fully validated.
+- Android behavior was inspected statically from the local APK, including exported symbols and the `libdsp.so` stereo reverb implementation. There has been no sample-for-sample comparison or direct runtime comparison with Android. Virtual 3D's native sample-processing algorithm remains unported; do not describe the app as bit-identical or fully validated.
 - 7.1 is a stereo output effect; the app does not produce eight physical audio channels or claim personalized binaural/HRTF rendering.
 - Library tags/artwork are not fully parsed; title/artist are inferred from filename, album may be unknown, and duration is learned during playback.
 - Apple Music/device-wide media scan, embedded metadata/artwork extraction, microphone capture, StoreKit/paywall, Firebase services, widgets, and all remaining Android-specific functions are not implemented.
@@ -58,14 +58,14 @@ The app is a local-file music player with library, now-playing controls, EQ, Vir
 
 ## Last local checks
 
-- `npx tsc --noEmit` passed after the effect/store/UI edits.
-- `git diff --check` passed.
-- `npx expo lint -- --cache-location /tmp/musicplayer-eslint-cache` passed. Plain lint could not write Expo's default cache because this project path is read-only in the current sandbox.
-- No iOS native build, simulator execution, or real-device audio test has run in this task yet.
+- `npx tsc --noEmit` passed for the playback and surround fixes on 2026-10-18.
+- `git diff --check` passed for the playback and surround fixes.
+- `npm run lint` (`expo lint`) passed for the playback and surround fixes.
+- No build has run for the latest edits yet. No automated playback test, simulator run, or independent physical-device audio verification was performed.
 
 ## Immediate next steps
 
-1. Commit and push the current effect changes to `codex/unsigned-ios-device-ipa`, which triggers the unsigned IPA workflow.
+1. Publish the playback and surround fixes to `codex/unsigned-ios-device-ipa` to trigger the unsigned IPA workflow.
 2. Inspect the Actions run logs; repair and rerun if it fails.
 3. When the IPA artifact is published, notify the user in this Codex thread and provide its Actions artifact download link. An email recipient address and connected sender account are not available in this project context.
 4. After installation/signing, compare EQ, Virtual 3D, and Surround 7.1 on the user's iPhone/headphones and refine based on actual audio.

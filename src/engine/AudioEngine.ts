@@ -3,7 +3,12 @@ import {
   setAudioModeAsync,
   type AudioPlayer,
 } from 'expo-audio';
-import { PlaybackNotificationManager, type AudioTagHandle, type AudioTagPlaybackState } from 'react-native-audio-api';
+import {
+  AudioManager,
+  PlaybackNotificationManager,
+  type AudioTagHandle,
+  type AudioTagPlaybackState,
+} from 'react-native-audio-api';
 import { DSPManager } from './DSPManager';
 import { AudioGraphController } from './AudioGraphController';
 
@@ -63,10 +68,39 @@ export class AudioEngine {
   private positionSeconds = 0;
   private durationSeconds = 0;
   private lastNotificationUpdateMs = 0;
+  private interruptionActive = false;
+  private resumeAfterInterruption = false;
 
   private constructor() {
     this.dspManager = new DSPManager(44100);
     this.audioGraph = AudioGraphController.getInstance();
+    AudioManager.addSystemEventListener('interruption', event => {
+      if (event.type === 'began') {
+        this.interruptionActive = true;
+        this.resumeAfterInterruption = this.shouldAutoplay && this.currentTrack !== null;
+        if (this.sound && this.currentState === 'playing') {
+          this.sound.pause();
+          this.clearAutoPause();
+          this.setState('paused');
+        }
+        return;
+      }
+
+      const shouldResume = this.resumeAfterInterruption && event.shouldResume;
+      if (this.resumeAfterInterruption && !event.shouldResume) {
+        this.shouldAutoplay = false;
+        this.clearAutoPause();
+        if (this.currentTrack) this.setState('paused');
+      }
+      this.interruptionActive = false;
+      this.resumeAfterInterruption = false;
+      if (shouldResume) void this.resumePlaybackAfterSystemChange();
+    });
+    AudioManager.addSystemEventListener('routeChange', () => {
+      if (!this.interruptionActive && this.shouldAutoplay) {
+        void this.resumePlaybackAfterSystemChange();
+      }
+    });
     PlaybackNotificationManager.addEventListener('playbackNotificationPlay', () => { void this.play(); });
     PlaybackNotificationManager.addEventListener('playbackNotificationPause', () => { void this.pause(); });
     PlaybackNotificationManager.addEventListener('playbackNotificationNextTrack', () => { void this.next(); });
@@ -125,6 +159,7 @@ export class AudioEngine {
     const generation = ++this.loadGeneration;
     this.handlingTrackEnd = false;
     this.shouldAutoplay = true;
+    this.resumeAfterInterruption = this.interruptionActive;
     this.positionSeconds = 0;
     this.durationSeconds = track.duration / 1000;
     this.setState('loading');
@@ -144,16 +179,16 @@ export class AudioEngine {
   async attachNativePlayer(trackId: string, requestId: number, handle: AudioTagHandle) {
     if (requestId !== this.loadGeneration || trackId !== this.currentTrack?.id) return;
     try {
-      await this.audioGraph.connect(handle);
-      if (requestId !== this.loadGeneration) {
-        this.audioGraph.disconnectSource();
+      const connected = await this.audioGraph.connect(handle);
+      if (!connected || requestId !== this.loadGeneration || trackId !== this.currentTrack?.id) {
+        this.audioGraph.disconnectSource(handle);
         return;
       }
       this.sound = handle;
       this.audioGraph.setVolume(this.volume);
       this.audioGraph.setPan(this.pan);
       this.applyDSPSettings();
-      if (this.shouldAutoplay) {
+      if (this.shouldAutoplay && !this.interruptionActive) {
         handle.play();
         this.setState('playing');
         this.scheduleAutoPause();
@@ -178,6 +213,7 @@ export class AudioEngine {
     if (Number.isFinite(duration) && duration > 0) this.durationSeconds = duration;
     this.listener?.onPositionChange(this.positionSeconds * 1000, this.durationSeconds * 1000);
     if (Date.now() - this.lastNotificationUpdateMs >= 1000) void this.updatePlaybackNotification();
+    if (this.interruptionActive) return;
     if (playbackState === 'playing' || playbackState === 'buffering') this.setState('playing');
     else if (playbackState === 'paused' && this.currentState === 'playing') this.setState('paused');
   }
@@ -193,6 +229,29 @@ export class AudioEngine {
     this.audioGraph.disconnectSource();
     this.clearAutoPause();
     this.setState('idle');
+  }
+
+  private async resumePlaybackAfterSystemChange() {
+    const handle = this.sound;
+    const requestId = this.loadGeneration;
+    if (!handle || !this.shouldAutoplay || this.interruptionActive) return;
+    try {
+      await this.audioGraph.context.resume();
+      if (
+        requestId !== this.loadGeneration
+        || handle !== this.sound
+        || !this.shouldAutoplay
+        || this.interruptionActive
+      ) return;
+      handle.play();
+      this.setState('playing');
+      this.scheduleAutoPause();
+      void this.updatePlaybackNotification();
+    } catch (error) {
+      if (requestId === this.loadGeneration) {
+        this.listener?.onError(error instanceof Error ? error.message : 'Could not resume audio');
+      }
+    }
   }
 
   private async updatePlaybackNotification() {
@@ -249,20 +308,41 @@ export class AudioEngine {
 
   async play() {
     this.shouldAutoplay = true;
+    if (this.interruptionActive) {
+      this.resumeAfterInterruption = this.currentTrack !== null;
+      if (this.currentTrack) this.setState('paused');
+      return;
+    }
     if (!this.sound) {
       if (this.currentTrack) this.setState('loading');
       return;
     }
     if (this.durationSeconds > 0 && this.positionSeconds >= this.durationSeconds) await this.seekTo(0);
-    await this.audioGraph.context.resume();
-    this.sound.play();
-    this.setState('playing');
-    this.scheduleAutoPause();
-    void this.updatePlaybackNotification();
+    const requestId = this.loadGeneration;
+    try {
+      await this.audioGraph.context.resume();
+      const handle = this.sound;
+      if (
+        !handle
+        || requestId !== this.loadGeneration
+        || !this.shouldAutoplay
+        || this.interruptionActive
+      ) return;
+      handle.play();
+      this.setState('playing');
+      this.scheduleAutoPause();
+      void this.updatePlaybackNotification();
+    } catch (error) {
+      if (requestId === this.loadGeneration) {
+        this.listener?.onError(error instanceof Error ? error.message : 'Could not start audio');
+        this.setState('paused');
+      }
+    }
   }
 
   async pause() {
     this.shouldAutoplay = false;
+    this.resumeAfterInterruption = false;
     if (!this.sound) {
       if (this.currentTrack) this.setState('paused');
       this.clearAutoPause();
@@ -482,6 +562,9 @@ export class AudioEngine {
 
   async release() {
     this.loadGeneration += 1;
+    this.shouldAutoplay = false;
+    this.interruptionActive = false;
+    this.resumeAfterInterruption = false;
     this.sleepDeadlineMs = null;
     this.autoPauseMs = null;
     await this.releaseSound();

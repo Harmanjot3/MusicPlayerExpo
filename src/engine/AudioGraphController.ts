@@ -15,6 +15,7 @@ export class AudioGraphController {
   private static instance: AudioGraphController;
   readonly context: AudioContext;
   private source: MediaElementAudioSourceNode | null = null;
+  private sourceHandle: AudioTagHandle | null = null;
   private readonly filters: BiquadFilterNode[];
   private readonly preGain: GainNode;
   private readonly bassBoost: BiquadFilterNode;
@@ -42,15 +43,15 @@ export class AudioGraphController {
   private eqEnabled = true;
 
   private constructor() {
-    const sampleRate = AudioManager.getDevicePreferredSampleRate();
-    this.context = new AudioContext({
-      sampleRate: sampleRate > 0 ? Math.max(8000, Math.min(sampleRate, 96000)) : 44100,
-    });
     AudioManager.setAudioSessionOptions({
       iosCategory: 'playback',
       iosMode: 'default',
     });
     AudioManager.observeAudioInterruptions(true);
+    const sampleRate = AudioManager.getDevicePreferredSampleRate();
+    this.context = new AudioContext({
+      sampleRate: sampleRate > 0 ? Math.max(8000, Math.min(sampleRate, 96000)) : 44100,
+    });
 
     this.filters = this.bands.map(band => {
       const filter = this.context.createBiquadFilter();
@@ -107,7 +108,7 @@ export class AudioGraphController {
     return this.instance;
   }
 
-  /** Build the Android player's Freeverb-style comb/allpass network as a true-stereo IR. */
+  /** Build the original stereo Freeverb network as a four-channel convolution IR. */
   private createSpatialRoomImpulse(spread: number) {
     const sampleRate = this.context.sampleRate;
     const length = Math.max(1, Math.floor(sampleRate * 2.4));
@@ -123,8 +124,11 @@ export class AudioGraphController {
     }));
     const leftLines = [...makeLines(combLeft), ...makeLines(allpassLeft)];
     const rightLines = [...makeLines(combRight), ...makeLines(allpassRight)];
+    // libdsp.so defaults: input gain 0.015, feedback 0.84, damping 0.2,
+    // allpass feedback 0.5, and wet scale 3. The input gain is applied below
+    // while rendering the impulse response.
     const feedback = 0.84;
-    const damp = 0.08;
+    const damp = 0.2;
     const allpassFeedback = 0.5;
     const process = (input: number, lines: typeof leftLines) => {
       let output = 0;
@@ -165,16 +169,21 @@ export class AudioGraphController {
     return impulse;
   }
 
-  async connect(handle: AudioTagHandle) {
+  async connect(handle: AudioTagHandle): Promise<boolean> {
     this.disconnectSource();
-    this.source = this.context.createMediaElementSource(handle);
-    this.source.connect(this.filters[0]);
+    const source = this.context.createMediaElementSource(handle);
+    this.source = source;
+    this.sourceHandle = handle;
+    source.connect(this.filters[0]);
     await this.context.resume();
+    return this.source === source && this.sourceHandle === handle;
   }
 
-  disconnectSource() {
+  disconnectSource(handle?: AudioTagHandle) {
+    if (handle && this.sourceHandle !== handle) return;
     this.source?.disconnect();
     this.source = null;
+    this.sourceHandle = null;
   }
 
   setBands(bands: EQBand[], enabled: boolean) {
@@ -226,6 +235,7 @@ export class AudioGraphController {
 
   setSurround71Enabled(enabled: boolean) {
     this.surround71Enabled = enabled;
+    this.dryGain.gain.value = enabled ? 0 : 1;
     this.wetGain.gain.value = enabled ? this.surround71Level : 0;
   }
 
