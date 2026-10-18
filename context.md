@@ -50,7 +50,7 @@ The app is a local-file music player with library, now-playing controls, EQ, Vir
 
 ## Known gaps and verification limits
 
-- The user installed a prior unsigned IPA (workflow run `39116511112`) and reported that playback can stop when toggling Surround and that later tracks can be silent. Source fixes are being prepared for a new workflow run; source checks do not confirm physical-device audio behavior.
+- The user installed a prior unsigned IPA (workflow run `39116511112`) and reported that playback can stop when toggling Surround and that later tracks can be silent. Workflow run `39122478118` failed at `npm ci` because the first GitHub API publish truncated `package-lock.json`; the complete lockfile is being republished before retrying. Source checks do not confirm physical-device audio behavior.
 - The IPA workflow sets `CODE_SIGNING_ALLOWED=NO`; its artifact is unsigned. It cannot be directly installed on iPhone/iPad without signing through a compatible sideloading workflow. The user has no paid Apple Developer account.
 - Android behavior was inspected read-only from the local APK with REA, JADX, and headless Ghidra. There has been no sample-for-sample comparison or direct runtime comparison with Android. The current iOS Virtual 3D worklet is not a complete port of Android's high-frequency-only signal path, and LF/HF effect routing/EQ order remain gaps; do not describe the app as bit-identical or fully validated.
 - 7.1 is a stereo output effect; the app does not produce eight physical audio channels or claim personalized binaural/HRTF rendering.
@@ -63,7 +63,7 @@ The app is a local-file music player with library, now-playing controls, EQ, Vir
 - `npx tsc --noEmit` passed after the current source changes on 2026-10-18.
 - `npx expo lint -- --cache-location /tmp/musicplayer-eslint-cache` was invoked after the current source changes; confirm its exit status before reporting it as passed.
 - `git diff --check` passed before the latest Markdown plan was added; rerun it before publishing.
-- No build has run for the latest edits yet. No automated playback test, simulator run, or independent physical-device audio verification was performed.
+- The iOS JS bundle export passed locally. Workflow run `39122478118` failed at dependency installation before native prebuild; no IPA or device audio verification came from that run.
 
 ## Immediate next steps
 
