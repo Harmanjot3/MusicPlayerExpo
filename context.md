@@ -50,7 +50,7 @@ The app is a local-file music player with library, now-playing controls, EQ, Vir
 
 ## Known gaps and verification limits
 
-- The user installed a prior unsigned IPA (workflow run `39116511112`) and reported that playback can stop when toggling Surround and that later tracks can be silent. Workflow run `39122478118` failed at `npm ci` because the first GitHub API publish truncated `package-lock.json`; the complete lockfile is being republished before retrying. Source checks do not confirm physical-device audio behavior.
+- The user reported playback interruptions when toggling Surround and silence on later tracks in an earlier IPA (`39116511112`). The current source adds guarded audio-source attachment, per-track delay reset, convolver-tail cleanup, interruption/route recovery, and a dry-path-preserving Surround toggle. These changes compile in workflow run `39122675483` (commit `920cfe0aa43a526e3feb36bd6be00851ca6ecdbc`). Its `ios-device-ipa` artifact was verified and is available until 2026-10-25. This proves build and packaging only; playback on the user's phone is still unverified.
 - The IPA workflow sets `CODE_SIGNING_ALLOWED=NO`; its artifact is unsigned. It cannot be directly installed on iPhone/iPad without signing through a compatible sideloading workflow. The user has no paid Apple Developer account.
 - Android behavior was inspected read-only from the local APK with REA, JADX, and headless Ghidra. There has been no sample-for-sample comparison or direct runtime comparison with Android. The current iOS Virtual 3D worklet is not a complete port of Android's high-frequency-only signal path, and LF/HF effect routing/EQ order remain gaps; do not describe the app as bit-identical or fully validated.
 - 7.1 is a stereo output effect; the app does not produce eight physical audio channels or claim personalized binaural/HRTF rendering.
@@ -60,15 +60,14 @@ The app is a local-file music player with library, now-playing controls, EQ, Vir
 
 ## Last local checks
 
-- `npx tsc --noEmit` passed after the current source changes on 2026-10-18.
-- `npx expo lint -- --cache-location /tmp/musicplayer-eslint-cache` was invoked after the current source changes; confirm its exit status before reporting it as passed.
-- `git diff --check` passed before the latest Markdown plan was added; rerun it before publishing.
-- The iOS JS bundle export passed locally. Workflow run `39122478118` failed at dependency installation before native prebuild; no IPA or device audio verification came from that run.
+- `npx tsc --noEmit` passed after the source changes on 2026-10-18.
+- Direct ESLint (`./node_modules/.bin/eslint --no-cache src`) passed; the Expo lint wrapper could not use the read-only `.expo` cache.
+- `npx expo export --platform ios` passed and bundled the iOS JavaScript.
+- GitHub Actions run `39122675483` passed dependency install, Expo prebuild, CocoaPods, Xcode device build, IPA packaging, and artifact upload. It produced the unsigned `ios-device-ipa` artifact (16,? bytes; artifact id `12134503442`).
 
 ## Immediate next steps
 
-1. Finish the exact Virtual 3D signal path and inspect any remaining feature gaps against [audio-reconstruction-plan.md](audio-reconstruction-plan.md).
-2. Run lint, typecheck, and whitespace checks, then publish the playback and surround fixes to `codex/unsigned-ios-device-ipa` to trigger the unsigned IPA workflow.
-3. Inspect the Actions run logs; repair and rerun if it fails.
-4. When the IPA artifact is published, notify the user in this Codex thread and provide its Actions artifact download link.
-5. After installation/signing, compare EQ, Virtual 3D, and Surround 7.1 on the user's iPhone/headphones and refine based on actual audio.
+1. Download `ios-device-ipa` from [successful workflow run 39122675483](https://github.com/Harmanjot3/MusicPlayerExpo/actions/runs/39122675483) before the artifact expires; on the run page open **Artifacts** and download the named ZIP.
+2. Use a compatible sideloading/signing path to install the IPA; it is unsigned and the user has no paid Apple Developer account.
+3. Complete the device acceptance checklist in [audio-reconstruction-plan.md](audio-reconstruction-plan.md), especially track advance, Surround toggles, speaker/Bluetooth routes, and effect sliders.
+4. Continue the exact high-frequency-only Virtual 3D port, native LF/HF routing and EQ order, and remaining whole-app feature mapping.
