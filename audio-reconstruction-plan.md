@@ -1,6 +1,6 @@
 # Android audio and app parity plan
 
-Updated 2026-10-18. This is the working checklist for rebuilding `com.tamalbasak.musicplayer` v1.7.01 as an iOS app. Checked items mean the source or static evidence has been inspected; they do not mean the behavior has passed an iPhone listening test.
+Updated 2026-11-23. This is the working checklist for rebuilding `com.tamalbasak.musicplayer` v1.7.01 as an iOS app. Checked items mean the source or static evidence has been inspected; they do not mean the behavior has passed an iPhone listening test.
 
 ## Reference and evidence
 
@@ -31,6 +31,9 @@ These are reports from the installed IPA, not locally reproduced results:
 
 ### Playback and graph lifecycle
 
+- [x] Defer audio graph construction until a track is requested; catch graph setup errors so an audio initialization failure does not blank the library UI.
+- [x] Keep the native playback host unmounted until a track is selected and guard graph creation before mounting the native audio element.
+- [x] Add a queue screen that lists the active playlist and starts a selected track.
 - [x] Prevent duplicate `MediaElementAudioSourceNode` creation for the same native audio handle.
 - [x] Scope source disconnection to the handle that owns it; deduplicate concurrent `onLoad` attachment for a track request.
 - [x] Reset delay history and discard the previous track's convolver tail on attachment.
@@ -74,6 +77,15 @@ These are reports from the installed IPA, not locally reproduced results:
 
 ## Limits and release path
 
+### Current verification
+
+- [x] `npx tsc --noEmit` passed for the current working tree.
+- [x] ESLint passed for `App.tsx` and `src/` after the queue screen font-weight correction.
+- [x] `npx expo export --platform ios` completed for the current working tree.
+- [ ] Build and launch the iOS simulator from this revision, then inspect its screenshot for the previous white-screen symptom.
+- [ ] Build a new unsigned device IPA from this revision and verify the `ios-device-ipa` artifact.
+- [ ] Physical iPhone audio validation is still needed; simulator launch and IPA packaging cannot establish audible speaker/Bluetooth output or exact DSP parity.
+
 An iOS implementation can reproduce the user-facing features and DSP behavior where the source algorithm is understood. It cannot reuse Android's JNI `.so`, its Android storage scan, Firebase wiring, or widgets directly; those need iOS implementations. The `7.1` label describes the app's stereo effect; iPhone playback remains stereo and this app does not implement personalized binaural/HRTF rendering.
 
-The current workflow creates an **unsigned** device IPA. Run `39122675483` completed successfully through Xcode build, IPA packaging, and artifact upload for commit `920cfe0aa43a526e3feb36bd6be00851ca6ecdbc`. The verified `ios-device-ipa` artifact (17,036,815 bytes; artifact id `12134503442`) is available until 2026-10-25. Download it from the run's **Artifacts** section. This proves build/package completion only; signing and real-device audio validation remain separate. The earlier run `39122478118` failed at `npm ci` because the initial GitHub API publish truncated the lockfile; the complete lockfile was restored in the successful retry. The user does not have a paid Apple Developer account, so a compatible sideloading/signing path is still required.
+The current workflow creates an **unsigned** device IPA. A successful artifact proves build/package completion only; signing and real-device audio validation remain separate steps. The user does not have a paid Apple Developer account, so preserve an unsigned IPA workflow and report compatible sideloading requirements clearly.

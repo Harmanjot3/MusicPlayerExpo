@@ -44,7 +44,7 @@ export class AudioEngine {
   } | null = null;
   private ambientSound: AudioPlayer | null = null;
   private dspManager: DSPManager;
-  private audioGraph: AudioGraphController;
+  private audioGraph: AudioGraphController | null = null;
   private listener: EngineInterface | null = null;
 
   private currentState: PlayerState = 'idle';
@@ -78,7 +78,6 @@ export class AudioEngine {
 
   private constructor() {
     this.dspManager = new DSPManager(44100);
-    this.audioGraph = AudioGraphController.getInstance();
     AudioManager.addSystemEventListener('interruption', event => {
       if (event.type === 'began') {
         this.interruptionActive = true;
@@ -128,6 +127,25 @@ export class AudioEngine {
   static getInstance(): AudioEngine {
     if (!AudioEngine.instance) AudioEngine.instance = new AudioEngine();
     return AudioEngine.instance;
+  }
+
+  /** Create native audio only on demand so a graph/worklet failure cannot blank app startup. */
+  private getAudioGraph(): AudioGraphController {
+    if (!this.audioGraph) {
+      const graph = AudioGraphController.getInstance();
+      this.audioGraph = graph;
+      graph.setVolume(this.volume);
+      graph.setPan(this.pan);
+      graph.setBands(this.dspManager.getBands(), this.dspManager.isEnabledAll());
+      graph.setMasterGain(this.masterGainDb);
+      graph.setBassBoost(this.bassBoostDb);
+      graph.setTrebleBoost(this.trebleBoostDb);
+      graph.setVirtual3DEnabled(this.virtual3dEnabled);
+      graph.setVirtual3DGap(this.virtual3dGapMs);
+      graph.setSurround71Enabled(this.surround71Enabled);
+      graph.setSurround71(this.surround71Level, this.surround71Spread);
+    }
+    return this.audioGraph;
   }
 
   setListener(listener: EngineInterface) { this.listener = listener; }
@@ -193,15 +211,16 @@ export class AudioEngine {
     const attachment = { trackId, requestId, handle };
     this.attachingNativePlayer = attachment;
     try {
-      const connected = await this.audioGraph.connect(handle);
+      const audioGraph = this.getAudioGraph();
+      const connected = await audioGraph.connect(handle);
       if (!connected || requestId !== this.loadGeneration || trackId !== this.currentTrack?.id) {
-        this.audioGraph.disconnectSource(handle);
+        audioGraph.disconnectSource(handle);
         return;
       }
-      this.audioGraph.resetTrackEffects();
+      audioGraph.resetTrackEffects();
       this.sound = handle;
-      this.audioGraph.setVolume(this.volume);
-      this.audioGraph.setPan(this.pan);
+      audioGraph.setVolume(this.volume);
+      audioGraph.setPan(this.pan);
       this.applyDSPSettings();
       if (this.shouldAutoplay && !this.interruptionActive) {
         handle.play();
@@ -243,7 +262,7 @@ export class AudioEngine {
     if (requestId !== this.loadGeneration) return;
     this.listener?.onError(error.message || 'Playback error');
     this.sound = null;
-    this.audioGraph.disconnectSource();
+    this.audioGraph?.disconnectSource();
     this.clearAutoPause();
     this.setState('idle');
   }
@@ -253,7 +272,7 @@ export class AudioEngine {
     const requestId = this.loadGeneration;
     if (!handle || !this.shouldAutoplay || this.interruptionActive) return;
     try {
-      await this.audioGraph.context.resume();
+      await this.getAudioGraph().context.resume();
       if (
         requestId !== this.loadGeneration
         || handle !== this.sound
@@ -337,7 +356,7 @@ export class AudioEngine {
     if (this.durationSeconds > 0 && this.positionSeconds >= this.durationSeconds) await this.seekTo(0);
     const requestId = this.loadGeneration;
     try {
-      await this.audioGraph.context.resume();
+      await this.getAudioGraph().context.resume();
       const handle = this.sound;
       if (
         !handle
@@ -418,19 +437,20 @@ export class AudioEngine {
 
   async setVolume(value: number) {
     this.volume = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : this.volume;
-    this.audioGraph.setVolume(this.volume);
+    this.audioGraph?.setVolume(this.volume);
   }
 
   getVolume(): number { return this.volume; }
 
   async setPan(value: number) {
     this.pan = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : this.pan;
-    this.audioGraph.setPan(this.pan);
+    this.audioGraph?.setPan(this.pan);
   }
 
   getPan(): number { return this.pan; }
 
   applyDSPSettings() {
+    if (!this.audioGraph) return;
     this.audioGraph.setBands(this.dspManager.getBands(), this.dspManager.isEnabledAll());
     this.audioGraph.setMasterGain(this.masterGainDb);
     this.audioGraph.setBassBoost(this.bassBoostDb);
@@ -443,38 +463,38 @@ export class AudioEngine {
 
   setMasterGain(value: number) {
     this.masterGainDb = Number.isFinite(value) ? Math.max(-20, Math.min(20, value)) : this.masterGainDb;
-    this.audioGraph.setMasterGain(this.masterGainDb);
+    this.audioGraph?.setMasterGain(this.masterGainDb);
   }
 
   setBassBoost(value: number) {
     this.bassBoostDb = Number.isFinite(value) ? Math.max(0, Math.min(30, value)) : this.bassBoostDb;
-    this.audioGraph.setBassBoost(this.bassBoostDb);
+    this.audioGraph?.setBassBoost(this.bassBoostDb);
   }
 
   setTrebleBoost(value: number) {
     this.trebleBoostDb = Number.isFinite(value) ? Math.max(0, Math.min(30, value)) : this.trebleBoostDb;
-    this.audioGraph.setTrebleBoost(this.trebleBoostDb);
+    this.audioGraph?.setTrebleBoost(this.trebleBoostDb);
   }
 
   setVirtual3DEnabled(enabled: boolean) {
     this.virtual3dEnabled = enabled;
-    this.audioGraph.setVirtual3DEnabled(enabled);
+    this.audioGraph?.setVirtual3DEnabled(enabled);
   }
 
   setVirtual3DGap(value: number) {
     this.virtual3dGapMs = Number.isFinite(value) ? Math.round(Math.max(1, Math.min(40, value))) : this.virtual3dGapMs;
-    this.audioGraph.setVirtual3DGap(this.virtual3dGapMs);
+    this.audioGraph?.setVirtual3DGap(this.virtual3dGapMs);
   }
 
   setSurround71Enabled(enabled: boolean) {
     this.surround71Enabled = enabled;
-    this.audioGraph.setSurround71Enabled(enabled);
+    this.audioGraph?.setSurround71Enabled(enabled);
   }
 
   setSurround71(level: number, spread: number) {
     this.surround71Level = Number.isFinite(level) ? Math.max(0.15, Math.min(0.45, level)) : this.surround71Level;
     this.surround71Spread = Number.isFinite(spread) ? Math.max(0.05, Math.min(0.7, spread)) : this.surround71Spread;
-    this.audioGraph.setSurround71(this.surround71Level, this.surround71Spread);
+    this.audioGraph?.setSurround71(this.surround71Level, this.surround71Spread);
   }
 
   setRepeat(type: RepeatType) { this.repeatType = type; }
@@ -574,7 +594,7 @@ export class AudioEngine {
     if (player) {
       player.pause();
     }
-    this.audioGraph.disconnectSource();
+    this.audioGraph?.disconnectSource();
   }
 
   async release() {
@@ -586,10 +606,9 @@ export class AudioEngine {
     this.autoPauseMs = null;
     await this.releaseSound();
     await this.stopAmbient();
-    await Promise.allSettled([
-      this.audioGraph.context.suspend(),
-      PlaybackNotificationManager.hide(),
-    ]);
+    const cleanup: Promise<unknown>[] = [PlaybackNotificationManager.hide()];
+    if (this.audioGraph) cleanup.push(this.audioGraph.context.suspend());
+    await Promise.allSettled(cleanup);
     this.listener?.onSleepTimerChange(null);
     this.playlist = [];
     this.shuffledOrder = [];

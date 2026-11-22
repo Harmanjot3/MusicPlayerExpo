@@ -50,8 +50,7 @@ jobs:
           set -euo pipefail
           DEVICE_APP="$RUNNER_TEMP/DeviceDerivedData/Build/Products/Release-iphoneos/MusicPlayerExpo.app"
           test -d "$DEVICE_APP"
-          mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          mkdir -p artifacts
+          mkdir -p "$RUNNER_TEMP/ipa/Payload" artifacts
           ditto "$DEVICE_APP" "$RUNNER_TEMP/ipa/Payload/MusicPlayerExpo.app"
           (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/artifacts/MusicPlayerExpo-unsigned.ipa" Payload)
           unzip -l artifacts/MusicPlayerExpo-unsigned.ipa | head -20

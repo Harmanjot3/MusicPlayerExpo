@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, Dimensions, TouchableOpacity,
-  Platform, StatusBar, Animated,
+  Platform, StatusBar, Animated, type GestureResponderEvent,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -208,11 +208,16 @@ function Controls() {
       </TouchableOpacity>
 
       {/* Repeat */}
-      <TouchableOpacity onPress={cycleRepeat} style={styles.sideBtn}>
+      <TouchableOpacity
+        onPress={cycleRepeat}
+        style={styles.sideBtn}
+        accessibilityRole="button"
+        accessibilityLabel={`Repeat mode: ${repeat}`}
+      >
         <Ionicons
-          name={repeat === 'one' ? 'repeat-outline' : 'repeat'}
+          name="repeat"
           size={22}
-          color={repeat !== 'none' ? Colors.primary : Colors.textMuted}
+          color={repeat === 'none' ? Colors.textMuted : Colors.primary}
         />
         {repeat === 'one' && (
           <Text style={styles.repeatOne}>1</Text>
@@ -222,16 +227,115 @@ function Controls() {
   );
 }
 
+// ─── Simple horizontal slider ─────────────────────────────────────────────────
+function SliderRow({
+  value, min, max, step, color, onChange, disabled = false,
+}: {
+  value: number; min: number; max: number; color: string;
+  onChange: (v: number) => void;
+  step?: number;
+  disabled?: boolean;
+}) {
+  const [trackWidth, setTrackWidth] = useState(width - 120);
+  const progress = Math.max(0, Math.min(1, (value - min) / (max - min)));
+  const W = trackWidth;
+
+  const updateFromEvent = (event: GestureResponderEvent) => {
+    const x = Math.max(0, Math.min(W, event.nativeEvent.locationX));
+    if (!disabled && W > 0) {
+      const raw = min + (x / W) * (max - min);
+      const next = step ? min + Math.round((raw - min) / step) * step : raw;
+      onChange(Math.max(min, Math.min(max, next)));
+    }
+  };
+
+  return (
+    <View
+      style={styles.sliderTrack}
+      accessibilityRole="adjustable"
+      accessibilityState={{ disabled }}
+      accessibilityValue={{ min, max, now: value }}
+      accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+      onAccessibilityAction={event => {
+        if (disabled) return;
+        const amount = step ?? (max - min) / 100;
+        const direction = event.nativeEvent.actionName === 'increment' ? 1 : -1;
+        onChange(Math.max(min, Math.min(max, value + direction * amount)));
+      }}
+      onLayout={event => setTrackWidth(event.nativeEvent.layout.width)}
+      onStartShouldSetResponder={() => !disabled}
+      onMoveShouldSetResponder={() => !disabled}
+      onResponderGrant={updateFromEvent}
+      onResponderMove={updateFromEvent}
+    >
+      <View pointerEvents="none" style={styles.sliderRail} />
+      <LinearGradient
+        pointerEvents="none"
+        colors={[color + '80', color]}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+        style={[styles.sliderFill, { width: `${progress * 100}%` }]}
+      />
+      <View pointerEvents="none" style={[styles.sliderThumb, { left: `${progress * 100}%`, backgroundColor: color }]} />
+    </View>
+  );
+}
+
+// ─── Volume Slider ────────────────────────────────────────────────────────────
+function VolumeSlider() {
+  const { volume, setVolume } = usePlayerStore();
+
+  return (
+    <View style={styles.volumeContainer}>
+      <TouchableOpacity
+        onPress={() => void setVolume(0)}
+        accessibilityLabel="Mute"
+        accessibilityRole="button"
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <Ionicons name="volume-low" size={20} color={Colors.textMuted} />
+      </TouchableOpacity>
+      <SliderRow
+        value={volume}
+        min={0}
+        max={1}
+        step={0.01}
+        color={Colors.primary}
+        onChange={setVolume}
+      />
+      <TouchableOpacity
+        onPress={() => void setVolume(1)}
+        accessibilityLabel="Maximum volume"
+        accessibilityRole="button"
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <Ionicons name="volume-high" size={20} color={Colors.textMuted} />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+export interface PlayerScreenProps {
+  onClose: () => void;
+  onOpenEQ: () => void;
+  onOpenQueue?: () => void;
+}
+
 // ─── Player Screen ───────────────────────────────────────────────────────────
 export default function PlayerScreen({
   onClose,
   onOpenEQ,
-}: {
-  onClose: () => void;
-  onOpenEQ: () => void;
-}) {
+  onOpenQueue,
+}: PlayerScreenProps) {
   const { currentTrack, playbackError, state } = usePlayerStore();
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
   const isPlaying = state === 'playing';
+
+  const showError = Boolean(playbackError && playbackError !== dismissedError);
+
+  const dismissError = () => {
+    setDismissedError(playbackError);
+    usePlayerStore.setState({ playbackError: null });
+  };
 
   return (
     <LinearGradient colors={['#1a0533', '#080d18', Colors.bg]} style={styles.screen}>
@@ -239,16 +343,40 @@ export default function PlayerScreen({
 
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={onClose} style={styles.headerBtn}>
+        <TouchableOpacity onPress={onClose} style={styles.headerBtn} accessibilityLabel="Close player">
           <Ionicons name="chevron-down" size={28} color={Colors.textPrimary} />
         </TouchableOpacity>
         <View>
           <Text style={styles.headerLabel}>NOW PLAYING</Text>
         </View>
-        <TouchableOpacity onPress={onOpenEQ} style={styles.headerBtn}>
-          <Ionicons name="options" size={24} color={Colors.textPrimary} />
-        </TouchableOpacity>
+        <View style={styles.headerRight}>
+          <TouchableOpacity onPress={onOpenQueue} style={styles.headerBtn} accessibilityLabel="Queue">
+            <Ionicons name="list-outline" size={24} color={Colors.textPrimary} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={onOpenEQ} style={styles.headerBtn} accessibilityLabel="Equalizer">
+            <Ionicons name="options" size={24} color={Colors.textPrimary} />
+          </TouchableOpacity>
+        </View>
       </View>
+
+      {/* Error Banner */}
+      {showError && (
+        <View style={styles.errorBanner} accessibilityRole="alert">
+          <Ionicons name="alert-circle-outline" size={18} color="#FDA4AF" style={styles.errorIcon} />
+          <Text style={styles.errorBannerText} numberOfLines={2}>
+            {playbackError}
+          </Text>
+          <TouchableOpacity
+            onPress={dismissError}
+            style={styles.errorDismissBtn}
+            accessibilityLabel="Dismiss error"
+            accessibilityRole="button"
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="close" size={16} color={Colors.textSecondary} />
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Album Art */}
       <View style={styles.albumSection}>
@@ -263,7 +391,6 @@ export default function PlayerScreen({
         <Text style={styles.trackArtist} numberOfLines={1}>
           {currentTrack?.artist ?? 'Unknown Artist'}
         </Text>
-        {playbackError && <Text accessibilityRole="alert" style={styles.playbackError}>{playbackError}</Text>}
       </View>
 
       {/* Waveform */}
@@ -274,6 +401,9 @@ export default function PlayerScreen({
 
       {/* Controls */}
       <Controls />
+
+      {/* Volume Slider */}
+      <VolumeSlider />
     </LinearGradient>
   );
 }
@@ -290,6 +420,11 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
   },
   headerBtn: { padding: 8 },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
   headerLabel: {
     fontSize: 12,
     fontWeight: '700',
@@ -365,6 +500,32 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   playbackError: { color: '#FDA4AF', fontSize: 13, marginTop: 8 },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+    borderRadius: 12,
+    marginHorizontal: 20,
+    marginTop: 4,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  errorIcon: {
+    marginRight: 2,
+  },
+  errorBannerText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#FDA4AF',
+    fontWeight: '500',
+  },
+  errorDismissBtn: {
+    padding: 4,
+  },
 
   waveformContainer: {
     flexDirection: 'row',
@@ -452,10 +613,56 @@ const styles = StyleSheet.create({
   },
   repeatOne: {
     position: 'absolute',
-    bottom: 6,
-    right: 6,
-    fontSize: 8,
-    fontWeight: '800',
-    color: Colors.primary,
+    top: 5,
+    right: 5,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: Colors.primary,
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: '900',
+    textAlign: 'center',
+    lineHeight: 14,
+    overflow: 'hidden',
+  },
+
+  volumeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+    marginTop: 20,
+    gap: 12,
+  },
+  sliderTrack: {
+    flex: 1,
+    height: 40,
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+    overflow: 'visible',
+  },
+  sliderRail: {
+    position: 'absolute',
+    top: 17,
+    left: 0,
+    right: 0,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: Colors.bgElevated,
+  },
+  sliderFill: {
+    position: 'absolute',
+    top: 17,
+    left: 0,
+    height: 6,
+    borderRadius: 3,
+  },
+  sliderThumb: {
+    position: 'absolute',
+    top: 10,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    marginLeft: -10,
   },
 });
