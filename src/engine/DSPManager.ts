@@ -1,15 +1,13 @@
 /**
  * DSPManager — mirrors com.tamalbasak.musicplayer.DSPManager
- * Pure-JS biquad-filter EQ chain. Each band is a second-order IIR filter.
- * Provides coefficient and sample-processing logic; the current Expo Audio
- * playback path does not yet route PCM through this manager.
+ * Mirrors the Android player's equalizer and effect parameter ranges.
  */
 
 export interface EQBand {
   id: number;
   label: string;
   frequency: number;  // Hz
-  gain: number;       // dB, range [-12, +12]
+  gain: number;       // dB, range [-20, +20]
   q: number;          // Q factor
   enabled: boolean;
   // biquad coefficients (recomputed on param change)
@@ -20,31 +18,59 @@ export interface EQBand {
   y1: number; y2: number;
 }
 
-export const EQ_MIN_VALUE = -12;
-export const EQ_MAX_VALUE = 12;
+export const EQ_MIN_VALUE = -20;
+export const EQ_MAX_VALUE = 20;
+
+export interface EQPreset {
+  bands: number[];
+  masterGainDb: number;
+  bassBoostDb: number;
+  trebleBoostDb: number;
+  virtual3dEnabled: boolean;
+  virtual3dGapMs: number;
+  surround71Enabled: boolean;
+  surround71Level: number;
+  surround71Spread: number;
+}
 
 export const DEFAULT_BANDS: EQBand[] = [
-  { id: 0, label: '60',   frequency: 60,    gain: 0, q: 1.0, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
-  { id: 1, label: '170',  frequency: 170,   gain: 0, q: 1.0, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
-  { id: 2, label: '310',  frequency: 310,   gain: 0, q: 1.0, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
-  { id: 3, label: '600',  frequency: 600,   gain: 0, q: 1.0, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
-  { id: 4, label: '1K',   frequency: 1000,  gain: 0, q: 1.0, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
-  { id: 5, label: '3K',   frequency: 3000,  gain: 0, q: 1.0, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
-  { id: 6, label: '14K',  frequency: 14000, gain: 0, q: 1.0, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 0, label: '32', frequency: 32, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 1, label: '64', frequency: 64, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 2, label: '125', frequency: 125, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 3, label: '250', frequency: 250, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 4, label: '500', frequency: 500, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 5, label: '1K', frequency: 1000, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 6, label: '2K', frequency: 2000, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 7, label: '4K', frequency: 4000, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 8, label: '8K', frequency: 8000, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
+  { id: 9, label: '16K', frequency: 16000, gain: 0, q: 0.5, enabled: true, b0:1,b1:0,b2:0,a1:0,a2:0,x1:0,x2:0,y1:0,y2:0 },
 ];
 
-/** Presets — mirrors EqPresetFileController */
-export const EQ_PRESETS: Record<string, number[]> = {
-  'Flat':       [ 0,  0,  0,  0,  0,  0,  0],
-  'Bass Boost': [ 8,  6,  4,  0,  0,  0,  0],
-  'Treble':     [ 0,  0,  0,  0,  2,  5,  8],
-  'Pop':        [-1,  3,  5,  3, -1, -2, -3],
-  'Rock':       [ 5,  3, -2, -2,  1,  4,  5],
-  'Jazz':       [ 4,  3,  1,  2, -1, -1,  2],
-  'Classical':  [ 5,  4,  3,  2,  0, -2, -4],
-  'Electronic': [ 5,  3,  0, -2,  2,  5,  5],
-  'Vocal':      [-3, -2,  4,  5,  4,  2, -2],
-  'Bass+Treble':[ 6,  4,  0,  0,  0,  4,  6],
+const preset = (
+  bands: number[], masterGainDb: number, bassBoostDb: number, trebleBoostDb: number,
+  virtual3dEnabled: boolean, virtual3dGapMs: number, surround71Enabled: boolean,
+  surround71Level: number, surround71Spread: number,
+): EQPreset => ({ bands, masterGainDb, bassBoostDb, trebleBoostDb, virtual3dEnabled, virtual3dGapMs, surround71Enabled, surround71Level, surround71Spread });
+
+/** System presets recovered from the Android app's bundled preset files. */
+export const EQ_PRESETS: Record<string, EQPreset> = {
+  'Acoustic 3D': preset([5,5,4,1,2,2,3,4,3,2], -3, 7.5, 0, true, 33, true, .22031, .7),
+  'Acoustic': preset([5,5,4,1,2,2,3,4,3,2], -3, 7.5, 0, false, 30, false, .22031, .7),
+  'Classical 3D': preset([4,3,2,1,-2,-2,0,2,3,4], -3, 7.5, 0, true, 33, true, .22031, .7),
+  'Classical': preset([4,3,2,1,-2,-2,0,2,3,4], -3, 7.5, 0, false, 30, false, .22031, .7),
+  'Dance 3D': preset([3,6,4,0,1,3,5,4,3,0], -5, 7.5, 0, true, 33, true, .22031, .6805),
+  'Dance': preset([3,6,4,0,1,3,5,4,3,0], -5, 7.5, 0, false, 30, false, .22031, .6805),
+  'Extreme BASS 3D': preset([20,15,9,0,2,-1,-6,-2,0,14], -8, 22.5, 0, true, 30, true, .22031, .7),
+  'Extreme BASS': preset([20,15,9,0,2,-1,-6,-2,0,14], -8, 22.5, 0, false, 30, false, .22031, .7),
+  'Flat 3D': preset([0,0,0,0,0,0,0,0,0,0], 0, 0, 0, true, 30, true, .22031, .7),
+  'Flat': preset([0,0,0,0,0,0,0,0,0,0], 0, 0, 0, false, 30, false, .22031, .7),
+  'Hip-Hop 3D': preset([5,4,1,2,-2,-2,1,-1,2,3], -5, 0, 0, true, 30, true, .22031, .7),
+  'Hip-Hop': preset([5,4,1,2,-2,-2,1,-1,2,3], -5, 0, 0, false, 30, false, .22031, .7),
+  'Pop 3D': preset([-2,-1,0,2,4,3,2,0,-1,-2], -5, 0, 0, true, 30, true, .22031, .7),
+  'Pop': preset([-2,-1,0,2,4,3,2,0,-1,-2], -5, 0, 0, false, 30, false, .22031, .7),
+  'Rock 3D': preset([5,4,2,2,1,-1,-1,2,3,5], -5, 8.7, 0, true, 30, true, .22031, .7),
+  'Rock': preset([5,4,2,2,1,-1,-1,2,3,5], -5, 8.7, 0, false, 30, false, .22031, .7),
+  'Speaker': preset([0,0,0,0,0,-3,-2,1,2,3], -3, 0, 9.45, false, 26, false, .24981, .6285),
 };
 
 /** Compute biquad peaking EQ coefficients (Audio EQ Cookbook) */
@@ -125,9 +151,9 @@ export class DSPManager {
   isEnabledAll(): boolean { return this.enabled; }
 
   loadPreset(name: string): boolean {
-    const gains = EQ_PRESETS[name];
-    if (!gains) return false;
-    gains.forEach((g, i) => this.setGain(i, g));
+    const preset = EQ_PRESETS[name];
+    if (!preset) return false;
+    preset.bands.forEach((g, i) => this.setGain(i, g));
     return true;
   }
 

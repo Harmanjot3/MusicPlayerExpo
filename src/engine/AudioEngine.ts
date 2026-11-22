@@ -3,7 +3,12 @@ import {
   setAudioModeAsync,
   type AudioPlayer,
 } from 'expo-audio';
-import { PlaybackNotificationManager, type AudioTagHandle, type AudioTagPlaybackState } from 'react-native-audio-api';
+import {
+  AudioManager,
+  PlaybackNotificationManager,
+  type AudioTagHandle,
+  type AudioTagPlaybackState,
+} from 'react-native-audio-api';
 import { DSPManager } from './DSPManager';
 import { AudioGraphController } from './AudioGraphController';
 
@@ -32,9 +37,14 @@ export interface EngineInterface {
 export class AudioEngine {
   private static instance: AudioEngine;
   private sound: AudioTagHandle | null = null;
+  private attachingNativePlayer: {
+    trackId: string;
+    requestId: number;
+    handle: AudioTagHandle;
+  } | null = null;
   private ambientSound: AudioPlayer | null = null;
   private dspManager: DSPManager;
-  private audioGraph: AudioGraphController;
+  private audioGraph: AudioGraphController | null = null;
   private listener: EngineInterface | null = null;
 
   private currentState: PlayerState = 'idle';
@@ -49,17 +59,52 @@ export class AudioEngine {
   private autoPauseMs: number | null = null;
   private sleepDeadlineMs: number | null = null;
   private autoPauseTimer: ReturnType<typeof setTimeout> | null = null;
-  private surroundStrength = 0;
+  private masterGainDb = 0;
+  private bassBoostDb = 0;
+  private trebleBoostDb = 0;
+  private virtual3dEnabled = true;
+  private virtual3dGapMs = 30;
+  private surround71Enabled = true;
+  private surround71Level = 0.22;
+  private surround71Spread = 0.7;
   private loadGeneration = 0;
   private handlingTrackEnd = false;
   private shouldAutoplay = true;
   private positionSeconds = 0;
   private durationSeconds = 0;
   private lastNotificationUpdateMs = 0;
+  private interruptionActive = false;
+  private resumeAfterInterruption = false;
 
   private constructor() {
     this.dspManager = new DSPManager(44100);
-    this.audioGraph = AudioGraphController.getInstance();
+    AudioManager.addSystemEventListener('interruption', event => {
+      if (event.type === 'began') {
+        this.interruptionActive = true;
+        this.resumeAfterInterruption = this.shouldAutoplay && this.currentTrack !== null;
+        if (this.sound && this.currentState === 'playing') {
+          this.sound.pause();
+          this.clearAutoPause();
+          this.setState('paused');
+        }
+        return;
+      }
+
+      const shouldResume = this.resumeAfterInterruption && event.shouldResume;
+      if (this.resumeAfterInterruption && !event.shouldResume) {
+        this.shouldAutoplay = false;
+        this.clearAutoPause();
+        if (this.currentTrack) this.setState('paused');
+      }
+      this.interruptionActive = false;
+      this.resumeAfterInterruption = false;
+      if (shouldResume) void this.resumePlaybackAfterSystemChange();
+    });
+    AudioManager.addSystemEventListener('routeChange', () => {
+      if (!this.interruptionActive && this.shouldAutoplay) {
+        void this.resumePlaybackAfterSystemChange();
+      }
+    });
     PlaybackNotificationManager.addEventListener('playbackNotificationPlay', () => { void this.play(); });
     PlaybackNotificationManager.addEventListener('playbackNotificationPause', () => { void this.pause(); });
     PlaybackNotificationManager.addEventListener('playbackNotificationNextTrack', () => { void this.next(); });
@@ -82,6 +127,25 @@ export class AudioEngine {
   static getInstance(): AudioEngine {
     if (!AudioEngine.instance) AudioEngine.instance = new AudioEngine();
     return AudioEngine.instance;
+  }
+
+  /** Create native audio only on demand so a graph/worklet failure cannot blank app startup. */
+  private getAudioGraph(): AudioGraphController {
+    if (!this.audioGraph) {
+      const graph = AudioGraphController.getInstance();
+      this.audioGraph = graph;
+      graph.setVolume(this.volume);
+      graph.setPan(this.pan);
+      graph.setBands(this.dspManager.getBands(), this.dspManager.isEnabledAll());
+      graph.setMasterGain(this.masterGainDb);
+      graph.setBassBoost(this.bassBoostDb);
+      graph.setTrebleBoost(this.trebleBoostDb);
+      graph.setVirtual3DEnabled(this.virtual3dEnabled);
+      graph.setVirtual3DGap(this.virtual3dGapMs);
+      graph.setSurround71Enabled(this.surround71Enabled);
+      graph.setSurround71(this.surround71Level, this.surround71Spread);
+    }
+    return this.audioGraph;
   }
 
   setListener(listener: EngineInterface) { this.listener = listener; }
@@ -118,6 +182,7 @@ export class AudioEngine {
     const generation = ++this.loadGeneration;
     this.handlingTrackEnd = false;
     this.shouldAutoplay = true;
+    this.resumeAfterInterruption = this.interruptionActive;
     this.positionSeconds = 0;
     this.durationSeconds = track.duration / 1000;
     this.setState('loading');
@@ -136,18 +201,28 @@ export class AudioEngine {
 
   async attachNativePlayer(trackId: string, requestId: number, handle: AudioTagHandle) {
     if (requestId !== this.loadGeneration || trackId !== this.currentTrack?.id) return;
+    if (this.sound === handle) return;
+    const currentAttachment = this.attachingNativePlayer;
+    if (
+      currentAttachment?.handle === handle
+      && currentAttachment.trackId === trackId
+      && currentAttachment.requestId === requestId
+    ) return;
+    const attachment = { trackId, requestId, handle };
+    this.attachingNativePlayer = attachment;
     try {
-      await this.audioGraph.connect(handle);
-      if (requestId !== this.loadGeneration) {
-        this.audioGraph.disconnectSource();
+      const audioGraph = this.getAudioGraph();
+      const connected = await audioGraph.connect(handle);
+      if (!connected || requestId !== this.loadGeneration || trackId !== this.currentTrack?.id) {
+        audioGraph.disconnectSource(handle);
         return;
       }
+      audioGraph.resetTrackEffects();
       this.sound = handle;
-      this.audioGraph.setVolume(this.volume);
-      this.audioGraph.setPan(this.pan);
-      this.audioGraph.setSurroundStrength(this.surroundStrength);
-      this.audioGraph.setBands(this.dspManager.getBands(), this.dspManager.isEnabledAll());
-      if (this.shouldAutoplay) {
+      audioGraph.setVolume(this.volume);
+      audioGraph.setPan(this.pan);
+      this.applyDSPSettings();
+      if (this.shouldAutoplay && !this.interruptionActive) {
         handle.play();
         this.setState('playing');
         this.scheduleAutoPause();
@@ -157,6 +232,8 @@ export class AudioEngine {
       void this.updatePlaybackNotification();
     } catch (error) {
       this.notifyNativePlaybackError(requestId, error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      if (this.attachingNativePlayer === attachment) this.attachingNativePlayer = null;
     }
   }
 
@@ -172,6 +249,7 @@ export class AudioEngine {
     if (Number.isFinite(duration) && duration > 0) this.durationSeconds = duration;
     this.listener?.onPositionChange(this.positionSeconds * 1000, this.durationSeconds * 1000);
     if (Date.now() - this.lastNotificationUpdateMs >= 1000) void this.updatePlaybackNotification();
+    if (this.interruptionActive) return;
     if (playbackState === 'playing' || playbackState === 'buffering') this.setState('playing');
     else if (playbackState === 'paused' && this.currentState === 'playing') this.setState('paused');
   }
@@ -184,9 +262,32 @@ export class AudioEngine {
     if (requestId !== this.loadGeneration) return;
     this.listener?.onError(error.message || 'Playback error');
     this.sound = null;
-    this.audioGraph.disconnectSource();
+    this.audioGraph?.disconnectSource();
     this.clearAutoPause();
     this.setState('idle');
+  }
+
+  private async resumePlaybackAfterSystemChange() {
+    const handle = this.sound;
+    const requestId = this.loadGeneration;
+    if (!handle || !this.shouldAutoplay || this.interruptionActive) return;
+    try {
+      await this.getAudioGraph().context.resume();
+      if (
+        requestId !== this.loadGeneration
+        || handle !== this.sound
+        || !this.shouldAutoplay
+        || this.interruptionActive
+      ) return;
+      handle.play();
+      this.setState('playing');
+      this.scheduleAutoPause();
+      void this.updatePlaybackNotification();
+    } catch (error) {
+      if (requestId === this.loadGeneration) {
+        this.listener?.onError(error instanceof Error ? error.message : 'Could not resume audio');
+      }
+    }
   }
 
   private async updatePlaybackNotification() {
@@ -243,20 +344,41 @@ export class AudioEngine {
 
   async play() {
     this.shouldAutoplay = true;
+    if (this.interruptionActive) {
+      this.resumeAfterInterruption = this.currentTrack !== null;
+      if (this.currentTrack) this.setState('paused');
+      return;
+    }
     if (!this.sound) {
       if (this.currentTrack) this.setState('loading');
       return;
     }
     if (this.durationSeconds > 0 && this.positionSeconds >= this.durationSeconds) await this.seekTo(0);
-    await this.audioGraph.context.resume();
-    this.sound.play();
-    this.setState('playing');
-    this.scheduleAutoPause();
-    void this.updatePlaybackNotification();
+    const requestId = this.loadGeneration;
+    try {
+      await this.getAudioGraph().context.resume();
+      const handle = this.sound;
+      if (
+        !handle
+        || requestId !== this.loadGeneration
+        || !this.shouldAutoplay
+        || this.interruptionActive
+      ) return;
+      handle.play();
+      this.setState('playing');
+      this.scheduleAutoPause();
+      void this.updatePlaybackNotification();
+    } catch (error) {
+      if (requestId === this.loadGeneration) {
+        this.listener?.onError(error instanceof Error ? error.message : 'Could not start audio');
+        this.setState('paused');
+      }
+    }
   }
 
   async pause() {
     this.shouldAutoplay = false;
+    this.resumeAfterInterruption = false;
     if (!this.sound) {
       if (this.currentTrack) this.setState('paused');
       this.clearAutoPause();
@@ -315,28 +437,65 @@ export class AudioEngine {
 
   async setVolume(value: number) {
     this.volume = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : this.volume;
-    this.audioGraph.setVolume(this.volume);
+    this.audioGraph?.setVolume(this.volume);
   }
 
   getVolume(): number { return this.volume; }
 
   async setPan(value: number) {
     this.pan = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : this.pan;
-    this.audioGraph.setPan(this.pan);
+    this.audioGraph?.setPan(this.pan);
   }
 
   getPan(): number { return this.pan; }
 
-  setSurroundStrength(value: number) {
-    this.surroundStrength = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : this.surroundStrength;
-    this.audioGraph.setSurroundStrength(this.surroundStrength);
-  }
-
   applyDSPSettings() {
+    if (!this.audioGraph) return;
     this.audioGraph.setBands(this.dspManager.getBands(), this.dspManager.isEnabledAll());
+    this.audioGraph.setMasterGain(this.masterGainDb);
+    this.audioGraph.setBassBoost(this.bassBoostDb);
+    this.audioGraph.setTrebleBoost(this.trebleBoostDb);
+    this.audioGraph.setVirtual3DEnabled(this.virtual3dEnabled);
+    this.audioGraph.setVirtual3DGap(this.virtual3dGapMs);
+    this.audioGraph.setSurround71Enabled(this.surround71Enabled);
+    this.audioGraph.setSurround71(this.surround71Level, this.surround71Spread);
   }
 
-  getSurroundStrength(): number { return this.surroundStrength; }
+  setMasterGain(value: number) {
+    this.masterGainDb = Number.isFinite(value) ? Math.max(-20, Math.min(20, value)) : this.masterGainDb;
+    this.audioGraph?.setMasterGain(this.masterGainDb);
+  }
+
+  setBassBoost(value: number) {
+    this.bassBoostDb = Number.isFinite(value) ? Math.max(0, Math.min(30, value)) : this.bassBoostDb;
+    this.audioGraph?.setBassBoost(this.bassBoostDb);
+  }
+
+  setTrebleBoost(value: number) {
+    this.trebleBoostDb = Number.isFinite(value) ? Math.max(0, Math.min(30, value)) : this.trebleBoostDb;
+    this.audioGraph?.setTrebleBoost(this.trebleBoostDb);
+  }
+
+  setVirtual3DEnabled(enabled: boolean) {
+    this.virtual3dEnabled = enabled;
+    this.audioGraph?.setVirtual3DEnabled(enabled);
+  }
+
+  setVirtual3DGap(value: number) {
+    this.virtual3dGapMs = Number.isFinite(value) ? Math.round(Math.max(1, Math.min(40, value))) : this.virtual3dGapMs;
+    this.audioGraph?.setVirtual3DGap(this.virtual3dGapMs);
+  }
+
+  setSurround71Enabled(enabled: boolean) {
+    this.surround71Enabled = enabled;
+    this.audioGraph?.setSurround71Enabled(enabled);
+  }
+
+  setSurround71(level: number, spread: number) {
+    this.surround71Level = Number.isFinite(level) ? Math.max(0.15, Math.min(0.45, level)) : this.surround71Level;
+    this.surround71Spread = Number.isFinite(spread) ? Math.max(0.05, Math.min(0.7, spread)) : this.surround71Spread;
+    this.audioGraph?.setSurround71(this.surround71Level, this.surround71Spread);
+  }
 
   setRepeat(type: RepeatType) { this.repeatType = type; }
   getRepeat(): RepeatType { return this.repeatType; }
@@ -435,19 +594,21 @@ export class AudioEngine {
     if (player) {
       player.pause();
     }
-    this.audioGraph.disconnectSource();
+    this.audioGraph?.disconnectSource();
   }
 
   async release() {
     this.loadGeneration += 1;
+    this.shouldAutoplay = false;
+    this.interruptionActive = false;
+    this.resumeAfterInterruption = false;
     this.sleepDeadlineMs = null;
     this.autoPauseMs = null;
     await this.releaseSound();
     await this.stopAmbient();
-    await Promise.allSettled([
-      this.audioGraph.context.suspend(),
-      PlaybackNotificationManager.hide(),
-    ]);
+    const cleanup: Promise<unknown>[] = [PlaybackNotificationManager.hide()];
+    if (this.audioGraph) cleanup.push(this.audioGraph.context.suspend());
+    await Promise.allSettled(cleanup);
     this.listener?.onSleepTimerChange(null);
     this.playlist = [];
     this.shuffledOrder = [];

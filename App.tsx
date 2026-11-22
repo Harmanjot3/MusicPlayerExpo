@@ -6,6 +6,7 @@ import { StatusBar } from 'expo-status-bar';
 import LibraryScreen from './src/screens/LibraryScreen';
 import PlayerScreen from './src/screens/PlayerScreen';
 import EQScreen from './src/screens/EQScreen';
+import QueueScreen from './src/screens/QueueScreen';
 import AudioPlaybackHost from './src/engine/AudioPlaybackHost';
 import { usePlayerStore } from './src/store/playerStore';
 import { Colors } from './src/theme/colors';
@@ -13,6 +14,7 @@ import { Colors } from './src/theme/colors';
 export default function App() {
   const [showPlayer, setShowPlayer] = useState(false);
   const [showEQ, setShowEQ] = useState(false);
+  const [showQueue, setShowQueue] = useState(false);
   const hydratePreferences = usePlayerStore(state => state.hydratePreferences);
 
   useEffect(() => {
@@ -38,6 +40,7 @@ export default function App() {
           <PlayerScreen
             onClose={() => setShowPlayer(false)}
             onOpenEQ={() => { setShowPlayer(false); setShowEQ(true); }}
+            onOpenQueue={() => { setShowPlayer(false); setShowQueue(true); }}
           />
         </Modal>
 
@@ -49,6 +52,16 @@ export default function App() {
           onRequestClose={() => setShowEQ(false)}
         >
           <EQScreen onClose={() => { setShowEQ(false); setShowPlayer(true); }} />
+        </Modal>
+
+        {/* Queue / Playlist — slide-up modal */}
+        <Modal
+          visible={showQueue}
+          animationType="slide"
+          presentationStyle="pageSheet"
+          onRequestClose={() => setShowQueue(false)}
+        >
+          <QueueScreen onClose={() => { setShowQueue(false); setShowPlayer(true); }} />
         </Modal>
 
       </SafeAreaProvider>

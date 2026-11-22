@@ -2,6 +2,9 @@ name: Build and launch iOS Simulator
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/unsigned-ios-device-ipa
 
 permissions:
   contents: read

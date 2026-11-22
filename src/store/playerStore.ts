@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { AudioEngine, TrackInfo, PlayerState, RepeatType, ShuffleType } from '../engine/AudioEngine';
-import { EQBand, DEFAULT_BANDS, EQ_PRESETS } from '../engine/DSPManager';
+import { EQBand, DEFAULT_BANDS, EQ_PRESETS, EQ_MIN_VALUE, EQ_MAX_VALUE } from '../engine/DSPManager';
 import { loadPlayerPreferences, savePlayerPreferences } from './playerPreferences';
 
 interface PlayerStore {
@@ -19,9 +19,16 @@ interface PlayerStore {
   eqEnabled: boolean;
   eqBands: EQBand[];
   selectedPreset: string;
-  // Surround / Panner
+  // Android DSP controls / Panner
   pan: number;
-  surroundStrength: number;
+  masterGainDb: number;
+  bassBoostDb: number;
+  trebleBoostDb: number;
+  virtual3dEnabled: boolean;
+  virtual3dGapMs: number;
+  surround71Enabled: boolean;
+  surround71Level: number;
+  surround71Spread: number;
   // Sleep timer
   sleepTimerMs: number | null;
   // Ambient
@@ -42,7 +49,14 @@ interface PlayerStore {
   setEQEnabled: (enabled: boolean) => void;
   loadPreset: (name: string) => void;
   setPan: (pan: number) => Promise<void>;
-  setSurroundStrength: (s: number) => void;
+  setMasterGain: (db: number) => void;
+  setBassBoost: (db: number) => void;
+  setTrebleBoost: (db: number) => void;
+  setVirtual3DEnabled: (enabled: boolean) => void;
+  setVirtual3DGap: (ms: number) => void;
+  setSurround71Enabled: (enabled: boolean) => void;
+  setSurround71Level: (level: number) => void;
+  setSurround71Spread: (spread: number) => void;
   setSleepTimer: (ms: number | null) => void;
   playAmbient: (uri: string) => Promise<void>;
   stopAmbient: () => Promise<void>;
@@ -70,7 +84,14 @@ function schedulePreferenceSave(getState: () => PlayerStore) {
       eqGains: state.eqBands.map(band => band.gain),
       selectedPreset: state.selectedPreset,
       pan: state.pan,
-      surroundStrength: state.surroundStrength,
+      masterGainDb: state.masterGainDb,
+      bassBoostDb: state.bassBoostDb,
+      trebleBoostDb: state.trebleBoostDb,
+      virtual3dEnabled: state.virtual3dEnabled,
+      virtual3dGapMs: state.virtual3dGapMs,
+      surround71Enabled: state.surround71Enabled,
+      surround71Level: state.surround71Level,
+      surround71Spread: state.surround71Spread,
     }).catch(() => undefined);
   }, 350);
 }
@@ -97,9 +118,16 @@ export const usePlayerStore = create<PlayerStore>((set, get) => {
     shuffle: 'off',
     eqEnabled: true,
     eqBands: DEFAULT_BANDS.map(b => ({ ...b })),
-    selectedPreset: 'Flat',
+    selectedPreset: 'Flat 3D',
     pan: 0,
-    surroundStrength: 0,
+    masterGainDb: 0,
+    bassBoostDb: 0,
+    trebleBoostDb: 0,
+    virtual3dEnabled: true,
+    virtual3dGapMs: 30,
+    surround71Enabled: true,
+    surround71Level: 0.22,
+    surround71Spread: 0.7,
     sleepTimerMs: null,
     ambientUri: null,
     ambientVolume: 0.3,
@@ -136,7 +164,7 @@ export const usePlayerStore = create<PlayerStore>((set, get) => {
 
     setEQBandGain: (id, gain) => {
       if (!Number.isInteger(id) || !get().eqBands[id] || !Number.isFinite(gain)) return;
-      const boundedGain = Math.max(-12, Math.min(12, gain));
+      const boundedGain = Math.max(EQ_MIN_VALUE, Math.min(EQ_MAX_VALUE, gain));
       engine.getDSP().setGain(id, boundedGain);
       engine.applyDSPSettings();
       const bands = [...get().eqBands];
@@ -154,11 +182,29 @@ export const usePlayerStore = create<PlayerStore>((set, get) => {
 
     loadPreset: (name) => {
       engine.getDSP().loadPreset(name);
-      const gains = EQ_PRESETS[name];
-      if (!gains) return;
+      const preset = EQ_PRESETS[name];
+      if (!preset) return;
       engine.applyDSPSettings();
-      const bands = get().eqBands.map((b, i) => ({ ...b, gain: gains[i] ?? 0 }));
-      set({ eqBands: bands, selectedPreset: name });
+      const bands = get().eqBands.map((b, i) => ({ ...b, gain: preset.bands[i] ?? 0 }));
+      set({
+        eqBands: bands,
+        selectedPreset: name,
+        masterGainDb: preset.masterGainDb,
+        bassBoostDb: preset.bassBoostDb,
+        trebleBoostDb: preset.trebleBoostDb,
+        virtual3dEnabled: preset.virtual3dEnabled,
+        virtual3dGapMs: preset.virtual3dGapMs,
+        surround71Enabled: preset.surround71Enabled,
+        surround71Level: preset.surround71Level,
+        surround71Spread: preset.surround71Spread,
+      });
+      engine.setMasterGain(preset.masterGainDb);
+      engine.setBassBoost(preset.bassBoostDb);
+      engine.setTrebleBoost(preset.trebleBoostDb);
+      engine.setVirtual3DEnabled(preset.virtual3dEnabled);
+      engine.setVirtual3DGap(preset.virtual3dGapMs);
+      engine.setSurround71Enabled(preset.surround71Enabled);
+      engine.setSurround71(preset.surround71Level, preset.surround71Spread);
       schedulePreferenceSave(get);
     },
 
@@ -169,10 +215,50 @@ export const usePlayerStore = create<PlayerStore>((set, get) => {
       schedulePreferenceSave(get);
     },
 
-    setSurroundStrength: (s) => {
-      const strength = Number.isFinite(s) ? Math.max(0, Math.min(1, s)) : get().surroundStrength;
-      set({ surroundStrength: strength });
-      engine.setSurroundStrength(strength);
+    setMasterGain: (db) => {
+      const value = Number.isFinite(db) ? Math.max(-20, Math.min(20, db)) : get().masterGainDb;
+      set({ masterGainDb: value, selectedPreset: 'Custom' });
+      engine.setMasterGain(value);
+      schedulePreferenceSave(get);
+    },
+    setBassBoost: (db) => {
+      const value = Number.isFinite(db) ? Math.max(0, Math.min(30, db)) : get().bassBoostDb;
+      set({ bassBoostDb: value, selectedPreset: 'Custom' });
+      engine.setBassBoost(value);
+      schedulePreferenceSave(get);
+    },
+    setTrebleBoost: (db) => {
+      const value = Number.isFinite(db) ? Math.max(0, Math.min(30, db)) : get().trebleBoostDb;
+      set({ trebleBoostDb: value, selectedPreset: 'Custom' });
+      engine.setTrebleBoost(value);
+      schedulePreferenceSave(get);
+    },
+    setVirtual3DEnabled: (enabled) => {
+      set({ virtual3dEnabled: enabled, selectedPreset: 'Custom' });
+      engine.setVirtual3DEnabled(enabled);
+      schedulePreferenceSave(get);
+    },
+    setVirtual3DGap: (ms) => {
+      const value = Number.isFinite(ms) ? Math.round(Math.max(1, Math.min(40, ms))) : get().virtual3dGapMs;
+      set({ virtual3dGapMs: value, selectedPreset: 'Custom' });
+      engine.setVirtual3DGap(value);
+      schedulePreferenceSave(get);
+    },
+    setSurround71Enabled: (enabled) => {
+      set({ surround71Enabled: enabled, selectedPreset: 'Custom' });
+      engine.setSurround71Enabled(enabled);
+      schedulePreferenceSave(get);
+    },
+    setSurround71Level: (level) => {
+      const value = Number.isFinite(level) ? Math.max(0.15, Math.min(0.45, level)) : get().surround71Level;
+      set({ surround71Level: value, selectedPreset: 'Custom' });
+      engine.setSurround71(value, get().surround71Spread);
+      schedulePreferenceSave(get);
+    },
+    setSurround71Spread: (spread) => {
+      const value = Number.isFinite(spread) ? Math.max(0.05, Math.min(0.7, spread)) : get().surround71Spread;
+      set({ surround71Spread: value, selectedPreset: 'Custom' });
+      engine.setSurround71(get().surround71Level, value);
       schedulePreferenceSave(get);
     },
 
@@ -211,7 +297,14 @@ export const usePlayerStore = create<PlayerStore>((set, get) => {
         eqBands,
         selectedPreset: preferences.selectedPreset,
         pan: preferences.pan,
-        surroundStrength: preferences.surroundStrength,
+        masterGainDb: preferences.masterGainDb,
+        bassBoostDb: preferences.bassBoostDb,
+        trebleBoostDb: preferences.trebleBoostDb,
+        virtual3dEnabled: preferences.virtual3dEnabled,
+        virtual3dGapMs: preferences.virtual3dGapMs,
+        surround71Enabled: preferences.surround71Enabled,
+        surround71Level: preferences.surround71Level,
+        surround71Spread: preferences.surround71Spread,
       });
       engine.setRepeat(preferences.repeat);
       engine.setShuffle(preferences.shuffle);
@@ -220,7 +313,13 @@ export const usePlayerStore = create<PlayerStore>((set, get) => {
       engine.applyDSPSettings();
       await engine.setVolume(preferences.volume);
       await engine.setPan(preferences.pan);
-      engine.setSurroundStrength(preferences.surroundStrength);
+      engine.setMasterGain(preferences.masterGainDb);
+      engine.setBassBoost(preferences.bassBoostDb);
+      engine.setTrebleBoost(preferences.trebleBoostDb);
+      engine.setVirtual3DEnabled(preferences.virtual3dEnabled);
+      engine.setVirtual3DGap(preferences.virtual3dGapMs);
+      engine.setSurround71Enabled(preferences.surround71Enabled);
+      engine.setSurround71(preferences.surround71Level, preferences.surround71Spread);
     },
 
     _setState: (state) => set({ state }),
