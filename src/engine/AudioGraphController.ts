@@ -151,10 +151,9 @@ export class AudioGraphController {
   ) {
     const sampleRate = this.context.sampleRate;
     const delayBuffer = new Float32Array(Math.max(1, Math.ceil(sampleRate * 0.04)));
-    let writeIndex = 0;
-    let currentDelayFrames = -1;
-    let previousEnabled = false;
-    let previousResetGeneration = 0;
+    // Keep callback state in a captured typed array. Worklet closures are
+    // serialized as constants, so captured scalar locals cannot be reassigned.
+    const state = new Float64Array([0, -1, 0, 0]);
 
     return this.context.createWorkletProcessingNode((inputData, outputData, framesToProcess) => {
       'worklet';
@@ -166,15 +165,15 @@ export class AudioGraphController {
       const delayFrames = Math.trunc(Math.max(1, Math.min(40, gapMs.getDirty())) * sampleRate / 1000);
       const nextResetGeneration = resetGeneration.getDirty();
       if (
-        delayFrames !== currentDelayFrames
-        || isEnabled !== previousEnabled
-        || nextResetGeneration !== previousResetGeneration
+        delayFrames !== state[1]
+        || isEnabled !== (state[2] !== 0)
+        || nextResetGeneration !== state[3]
       ) {
         delayBuffer.fill(0);
-        writeIndex = 0;
-        currentDelayFrames = delayFrames;
-        previousEnabled = isEnabled;
-        previousResetGeneration = nextResetGeneration;
+        state[0] = 0;
+        state[1] = delayFrames;
+        state[2] = isEnabled ? 1 : 0;
+        state[3] = nextResetGeneration;
       }
 
       for (let frame = 0; frame < framesToProcess; frame++) {
@@ -195,10 +194,10 @@ export class AudioGraphController {
 
       if (isEnabled) {
         for (let frame = 0; frame < framesToProcess; frame++) {
-          const delayed = delayBuffer[writeIndex];
-          delayBuffer[writeIndex] = rightInput[frame];
+          const delayed = delayBuffer[state[0]];
+          delayBuffer[state[0]] = rightInput[frame];
           rightOutput[frame] = delayed;
-          writeIndex = writeIndex + 1 === delayFrames ? 0 : writeIndex + 1;
+          state[0] = state[0] + 1 === delayFrames ? 0 : state[0] + 1;
         }
       } else {
         for (let frame = 0; frame < framesToProcess; frame++) rightOutput[frame] = rightInput[frame];
